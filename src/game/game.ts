@@ -7,6 +7,10 @@ import { UI, type PanelRect } from "./ui";
 import { InputManager, TouchState, type PlayerInput } from "../engine/input";
 import { audio } from "../engine/audio";
 import { clearSave, freshSave, loadSave, writeSave, type SaveData } from "./save";
+import { Post, type Quality } from "../engine/post";
+import { Net, newRoomCode, type NetMsg } from "../net/net";
+
+type Mode = "solo" | "host" | "client";
 
 interface Player {
   idx: number;
@@ -21,8 +25,8 @@ interface Player {
   lastLook: number;
 }
 
-const KEY_LABEL = ["E", ";", "Num9"];
-const ABILITY_LABEL = ["Q", ",", "Num1"];
+const KEY_LABEL = ["E"];
+const ABILITY_LABEL = ["Q"];
 const SPEAKER_COLORS: Record<string, string> = { Дымок: "#b8c0d0", Милена: "#f0f0f0", Пиксель: "#9ef59e", Карниз: "#ff9a4d", Пломбир: "#9cd8ff", Голубь: "#b5b5ff", Хозяйка: "#ffd0e0" };
 
 export class Game {
@@ -57,6 +61,20 @@ export class Game {
   private lastMusic = "";
   private bossActive = false;
   private delayed: { t: number; fn: () => void }[] = [];
+  post!: Post;
+  net: Net | null = null;
+  mode: Mode = "solo";
+  /** cats driven by network packets instead of local simulation */
+  puppets = new Set<CatId>();
+  /** host: peer id -> cat it controls */
+  peerCats = new Map<string, CatId>();
+  private netTimer = 0;
+  private worldTimer = 0;
+  private switchBlend = 0;
+
+  get authority() {
+    return this.mode !== "client";
+  }
 
   /** Game-time delay: pauses with the game and advances with debugStep. */
   private later(sec: number, fn: () => void) {
@@ -70,7 +88,6 @@ export class Game {
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.0;
-    this.renderer.setScissorTest(true);
     this.world = new World(this.scene);
     this.ui = new UI(uiRoot);
     this.input = new InputManager(canvas);
@@ -84,7 +101,7 @@ export class Game {
     addEventListener("resize", () => this.resize());
     canvas.addEventListener("click", () => {
       audio.unlock();
-      if (this.state === "play" && this.count === 1) this.input.requestPointerLock();
+      if (this.state === "play") this.input.requestPointerLock();
     });
   }
 
@@ -109,7 +126,10 @@ export class Game {
       p.mesh.add(m);
     }
     this.karniz = new Karniz(this.cats.karniz!);
-    this.karniz.onTaunt = (s) => this.ui.toast(s, 1800);
+    this.karniz.onTaunt = (s) => {
+      this.ui.toast(s, 1800);
+      if (this.mode === "host") this.net?.send({ t: "toast", text: s });
+    };
     this.cats.karniz!.root.position.copy(this.world.karnizSpawn);
     this.plombir = this.cats.plombir!;
     this.plombir.root.position.copy(this.world.plombirPos);
@@ -117,6 +137,10 @@ export class Game {
     this.plombir.root.rotation.y = Math.PI / 2;
     this.plombir.play("Sit");
     this.renderPortraits();
+    this.post = new Post(this.renderer, this.scene, this.cutCam);
+    const q = new URLSearchParams(location.search).get("q");
+    if (q === "low" || q === "med" || q === "high") this.qualityName = q;
+    this.setQuality(this.qualityName);
     this.ui.loading(null);
     this.resize();
     this.showMenu();
@@ -131,6 +155,10 @@ export class Game {
       uniforms: { sunDir: { value: new THREE.Vector3(-0.6, 0.18, 0.75).normalize() } },
       vertexShader: `varying vec3 vDir; void main(){ vDir = normalize(position); gl_Position = projectionMatrix*modelViewMatrix*vec4(position,1.); }`,
       fragmentShader: `varying vec3 vDir; uniform vec3 sunDir;
+        float h(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+        float n(vec2 p){ vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
+          return mix(mix(h(i), h(i + vec2(1, 0)), f.x), mix(h(i + vec2(0, 1)), h(i + vec2(1, 1)), f.x), f.y); }
+        float fbm(vec2 p){ float a = 0.5, s = 0.0; for (int i = 0; i < 5; i++) { s += a * n(p); p *= 2.03; a *= 0.5; } return s; }
         void main(){
           float y = vDir.y;
           vec3 top = vec3(0.12,0.16,0.38), mid = vec3(0.85,0.45,0.42), hor = vec3(1.0,0.66,0.38);
@@ -138,6 +166,13 @@ export class Game {
           c = mix(c, top, smoothstep(0.15,0.7,y));
           float s = max(dot(vDir, sunDir), 0.0);
           c += vec3(1.0,0.7,0.4) * pow(s, 60.0) * 2.0 + vec3(1.0,0.5,0.3) * pow(s, 6.0) * 0.35;
+          // wispy altocumulus lit from below by the low sun
+          if (y > 0.02) {
+            vec2 uv = vDir.xz / (y + 0.12) * 1.6;
+            float cl = smoothstep(0.52, 0.78, fbm(uv + vec2(3.0, 1.0)));
+            vec3 lit = mix(vec3(0.95, 0.55, 0.45), vec3(1.0, 0.8, 0.6), s);
+            c = mix(c, mix(vec3(0.35, 0.3, 0.42), lit, 0.55 + 0.45 * pow(s, 2.0)), cl * smoothstep(0.02, 0.2, y) * 0.85);
+          }
           if (y < 0.0) c = mix(hor*0.6, vec3(0.1,0.08,0.1), smoothstep(0.0,-0.2,y));
           gl_FragColor = vec4(c,1.);
         }`,
@@ -149,19 +184,19 @@ export class Game {
     const envScene = new THREE.Scene();
     envScene.add(new THREE.Mesh(skyGeo, skyMat));
     this.scene.environment = pmrem.fromScene(envScene, 0.02).texture;
-    this.scene.environmentIntensity = 0.55;
+    this.scene.environmentIntensity = 0.45;
     this.scene.fog = new THREE.Fog(0xc98a70, 60, 260);
-    const hemi = new THREE.HemisphereLight(0xffd4b0, 0x2a2438, 0.9);
+    const hemi = new THREE.HemisphereLight(0xc9d6ff, 0x3a3030, 0.6);
     this.scene.add(hemi);
-    const sun = new THREE.DirectionalLight(0xffc38a, 3.2);
+    const sun = new THREE.DirectionalLight(0xffd6ae, 3.6);
     sun.position.set(-30, 14, 36);
     sun.castShadow = true;
-    sun.shadow.mapSize.set(2048, 2048);
+    sun.shadow.mapSize.set(4096, 4096);
     const sc = sun.shadow.camera;
-    sc.left = -22;
-    sc.right = 22;
-    sc.top = 22;
-    sc.bottom = -22;
+    sc.left = -16;
+    sc.right = 16;
+    sc.top = 16;
+    sc.bottom = -16;
     sc.near = 1;
     sc.far = 120;
     sun.shadow.bias = -0.0004;
@@ -178,15 +213,16 @@ export class Game {
     const scene = new THREE.Scene();
     scene.environment = this.scene.environment;
     scene.background = new THREE.Color(0x1e2230);
-    scene.add(new THREE.HemisphereLight(0xffffff, 0x444466, 1.6));
-    const key = new THREE.DirectionalLight(0xffe0c0, 2.5);
+    // render targets skip tone mapping, so keep portrait lighting modest
+    scene.environmentIntensity = 0.35;
+    scene.add(new THREE.HemisphereLight(0xffffff, 0x444466, 0.55));
+    const key = new THREE.DirectionalLight(0xfff0e0, 1.1);
     key.position.set(1, 2, 3);
     scene.add(key);
     const buf = new Uint8Array(size * size * 4);
     const cnv = document.createElement("canvas");
     cnv.width = cnv.height = size;
     const g = cnv.getContext("2d")!;
-    this.renderer.setScissorTest(false);
     for (const id of ["dymok", "milena", "pixel", "karniz", "plombir"] as CatId[]) {
       const c = this.cats[id]!;
       const parent = c.root.parent;
@@ -210,7 +246,6 @@ export class Game {
       c.root.position.copy(saved);
     }
     this.renderer.setRenderTarget(null);
-    this.renderer.setScissorTest(true);
     rt.dispose();
   }
 
@@ -225,9 +260,25 @@ export class Game {
     this.ui.boss(null);
     this.menuCam();
     const saved = loadSave();
-    this.ui.menu(this.portraits, !!saved, (players, cont) => {
-      audio.unlock();
-      this.start(cont ? 0 : players, cont ? saved : null);
+    this.net?.close();
+    this.net = null;
+    this.mode = "solo";
+    this.puppets.clear();
+    this.ui.roomBadge(null);
+    const room = new URLSearchParams(location.search).get("room");
+    this.ui.menu(this.portraits, !!saved, room, {
+      solo: (cont) => {
+        audio.unlock();
+        this.start("solo", cont ? saved : null);
+      },
+      host: () => {
+        audio.unlock();
+        this.startHost();
+      },
+      join: (code) => {
+        audio.unlock();
+        this.startClient(code);
+      },
     });
     audio.play("menu");
   }
@@ -240,25 +291,22 @@ export class Game {
   }
 
   // ------------------------------------------------------------ session
-  private start(players: number, saved: SaveData | null) {
+  private start(mode: Mode, saved: SaveData | null, you: CatId = "dymok") {
+    this.mode = mode;
     this.save = saved ?? freshSave();
-    const count = saved ? Math.max(1, Number(localStorage.getItem("dm-players") || 1)) : players;
-    localStorage.setItem("dm-players", String(count));
-    this.count = count;
+    this.count = 1;
     this.party = [this.cats.dymok!, this.cats.milena!];
-    if (count === 3) this.party.push(this.cats.pixel!);
-    this.cats.pixel!.root.visible = count === 3;
-    this.cats.pixel!.root.position.set(0, -50, 0);
+    const pixelIn = mode !== "solo" && [...this.peerCats.values(), you].includes("pixel");
+    if (pixelIn) this.party.push(this.cats.pixel!);
+    this.cats.pixel!.root.visible = pixelIn;
+    if (!pixelIn) this.cats.pixel!.root.position.set(0, -50, 0);
     for (const c of this.party) {
       c.health = c.maxHealth;
       c.state = "normal";
       c.setCostume(this.save.equipped[c.def.id] ?? null);
     }
-    this.players = [];
-    for (let i = 0; i < count; i++) {
-      const cat = [this.cats.dymok!, this.cats.milena!, this.cats.pixel!][i];
-      this.players.push({ idx: i, cat, yaw: Math.PI, pitch: 0.25, dist: 1.7, fp: false, camera: new THREE.PerspectiveCamera(62, 1, 0.03, 600), rect: { x: 0, y: 0, w: 1, hgt: 1 }, prompt: "", lastLook: 0 });
-    }
+    const cat = this.cats[you]!;
+    this.players = [{ idx: 0, cat, yaw: Math.PI, pitch: 0.25, dist: 1.5, fp: false, camera: new THREE.PerspectiveCamera(60, 1, 0.02, 700), rect: { x: 0, y: 0, w: 1, hgt: 1 }, prompt: "", lastLook: 0 }];
     this.layoutViewports();
     this.world.pickups.forEach((p) => {
       p.taken = this.save.taken.includes(p.id);
@@ -267,9 +315,9 @@ export class Game {
     this.applyFlags();
     this.ui.setFish(this.save.fish);
     this.started = true;
-    if (!this.save.flags.intro) {
+    if (!this.save.flags.intro && mode !== "client") {
       this.placeAtStart();
-      this.runCutscene(() => this.introCutscene());
+      this.cutscene("intro");
     } else {
       this.respawnAll();
       this.state = "play";
@@ -294,7 +342,7 @@ export class Game {
     w.interactables.find((i) => i.id === "latch")!.enabled = false;
     w.interactables.find((i) => i.id === "grate_push")!.enabled = !f.grateOpen;
     w.interactables.find((i) => i.id === "coop")!.enabled = !f.bracelets;
-    w.window.position.y = f.intro ? 4.4 : 5.05;
+    w.window.position.y = f.intro ? w.windowClosedY : w.windowOpenY;
     w.rain.visible = !!f.intro && !f.met;
     this.karniz.state = f.bossDefeated ? "defeated" : "inactive";
     this.cats.karniz!.root.position.copy(w.karnizSpawn);
@@ -307,7 +355,7 @@ export class Game {
     d.root.position.copy(this.world.spawn.dymok);
     d.yaw = Math.PI;
     m.root.position.copy(this.world.spawn.milenaStreet);
-    if (this.count === 3) this.cats.pixel!.root.position.copy(this.world.spawn.pixel);
+    if (this.party.includes(this.cats.pixel!)) this.cats.pixel!.root.position.copy(this.world.spawn.pixel);
   }
 
   private checkpointFor(cat: Cat) {
@@ -315,7 +363,7 @@ export class Game {
     if (cp) return cp.pos.clone().add(new THREE.Vector3((this.party.indexOf(cat) - 1) * 0.5, 0.05, 0.3));
     if (cat.def.id === "dymok") return this.world.spawn.dymok.clone();
     if (cat.def.id === "pixel") return this.world.spawn.pixel.clone();
-    return this.count === 1 && !this.save.flags.met ? this.world.spawn.milenaBasement.clone() : new THREE.Vector3(0, 0.05, 10);
+    return !this.save.flags.met ? this.world.spawn.milenaBasement.clone() : new THREE.Vector3(0, 0.05, 10);
   }
 
   private respawnAll() {
@@ -329,17 +377,14 @@ export class Game {
   private setupCompanions() {
     const controlled = new Set(this.players.map((p) => p.cat));
     for (const c of this.party) {
-      if (controlled.has(c)) c.ai = "none";
+      if (controlled.has(c) || this.puppets.has(c.def.id) || [...this.peerCats.values()].includes(c.def.id)) c.ai = "none";
       else c.ai = this.save.flags.met ? "follow" : "wait";
     }
   }
 
   private layoutViewports() {
-    const n = this.players.length;
-    const rects: PanelRect[] = n === 1 ? [{ x: 0, y: 0, w: 1, hgt: 1 }] : n === 2 ? [{ x: 0, y: 0, w: 0.5, hgt: 1 }, { x: 0.5, y: 0, w: 0.5, hgt: 1 }] : [{ x: 0, y: 0, w: 0.5, hgt: 1 }, { x: 0.5, y: 0, w: 0.5, hgt: 0.5 }, { x: 0.5, y: 0.5, w: 0.5, hgt: 0.5 }];
-    this.players.forEach((p, i) => (p.rect = rects[i]));
-    this.ui.setupPanels(rects, this.players.map((p) => p.cat.def.name));
-    this.ui.showPortraits(n === 1);
+    this.ui.setupPanels([{ x: 0, y: 0, w: 1, hgt: 1 }], [this.players[0].cat.def.name]);
+    this.ui.showPortraits(true);
     this.resize();
   }
 
@@ -348,59 +393,70 @@ export class Game {
     this.canvas.style.width = "100%";
     this.canvas.style.height = "100%";
     for (const p of this.players) {
-      p.camera.aspect = (p.rect.w * innerWidth) / (p.rect.hgt * innerHeight);
+      p.camera.aspect = innerWidth / innerHeight;
       p.camera.updateProjectionMatrix();
     }
     this.cutCam.aspect = innerWidth / innerHeight;
     this.cutCam.updateProjectionMatrix();
+    this.post?.setSize(innerWidth, innerHeight);
   }
 
   setQuality(q: string) {
     this.qualityName = q;
-    const shells = q === "high" ? 12 : q === "med" ? 8 : 4;
+    const shells = q === "high" ? 16 : q === "med" ? 10 : 6;
     quality.shells = shells;
-    // hide the outer shells instead of rebuilding materials
-    for (const c of Object.values(this.cats)) {
-      let i = 0;
-      c?.model?.traverse((o) => {
-        if (o.userData.furShell) {
-          i++;
-          o.visible = i % 12 < shells || shells >= 12;
-        }
-      });
+    for (const c of Object.values(this.cats)) c?.setFurQuality(shells);
+    this.renderer.setPixelRatio(q === "low" ? 1 : Math.min(devicePixelRatio, q === "high" ? 1.5 : 1.25));
+    const sm = q === "high" ? 4096 : 2048;
+    if (this.sun && this.sun.shadow.mapSize.x !== sm) {
+      this.sun.shadow.mapSize.set(sm, sm);
+      this.sun.shadow.map?.dispose();
+      this.sun.shadow.map = null;
     }
-    this.renderer.setPixelRatio(q === "low" ? 1 : Math.min(devicePixelRatio, 1.5));
+    this.post?.setQuality(q as Quality);
+    this.resize();
   }
 
   // ------------------------------------------------------------ portraits / switching
   private refreshPortraits() {
-    if (this.count !== 1) return;
-    const active = this.players[0].cat;
+    const active = this.players[0]?.cat;
+    if (!active) return;
+    const online = this.mode !== "solo";
     const list = this.party.map((c) => ({
       id: c.def.id,
       name: c.def.name,
       img: this.portraits[c.def.id],
       active: c === active,
-      locked: c !== active && !this.save.flags.grateOpen,
-      order: c === active ? "" : c.ai === "follow" ? "за мной" : c.ai === "wait" ? "ждёт" : "",
+      locked: online && c !== active,
+      order: online
+        ? c === active ? "вы" : this.puppets.has(c.def.id) ? "игрок" : "ждёт игрока"
+        : c === active ? "" : c.ai === "follow" ? "за мной" : "ждёт",
     }));
     this.ui.setPortraits(list, (id) => this.switchTo(this.cats[id as CatId]!));
   }
 
+  /** Solo: hand control to the other cat. The camera swoops over and the old cat becomes AI. */
   private switchTo(cat: Cat) {
     const p = this.players[0];
-    if (cat === p.cat || this.count !== 1) return;
-    if (!this.save.flags.grateOpen) {
-      this.ui.toast("Сначала котам нужно помочь друг другу — тогда можно переключаться.");
+    if (!p || cat === p.cat) return;
+    if (this.mode !== "solo") {
+      this.ui.toast("В онлайне каждым котом управляет свой игрок.");
       return;
     }
     const old = p.cat;
-    old.ai = "follow";
+    old.ai = this.save.flags.met ? "follow" : "wait";
+    old.body.vel.set(0, old.body.vel.y, 0);
     cat.ai = "none";
+    cat.state = cat.state === "scripted" ? "normal" : cat.state;
     p.cat = cat;
     p.yaw = cat.yaw + Math.PI;
+    p.fp = false;
+    this.switchBlend = 1;
     this.ui.soulFlash();
+    audio.swapChime();
     audio.meow(cat.def.pitch, 0.6);
+    this.ui.toast(`Теперь вы — ${cat.def.name}`, 1400);
+    this.ui.setupPanels([{ x: 0, y: 0, w: 1, hgt: 1 }], [cat.def.name]);
     this.refreshPortraits();
   }
 
@@ -447,10 +503,26 @@ export class Game {
         c.state = "normal";
         c.scriptedTarget = null;
       }
-      writeSave(this.save);
+      this.persist();
       this.state = "play";
       for (const p of this.players) p.yaw = p.cat.yaw + Math.PI;
     }
+  }
+
+  private scripts(): Record<string, () => Promise<void>> {
+    return {
+      intro: () => this.introCutscene(),
+      meet: () => this.meetCutscene(),
+      grate: () => this.grateOpenedCutscene(),
+      bossIntro: () => this.bossIntro(),
+      bossDefeat: () => this.bossDefeat(),
+    };
+  }
+
+  /** Runs a cutscene locally and, on the host, on every connected client too. */
+  private cutscene(name: string) {
+    if (this.mode === "host") this.net?.send({ t: "cut", name });
+    return this.runCutscene(this.scripts()[name]);
   }
 
   private walk(cat: Cat, to: THREE.Vector3, speed = 1.3) {
@@ -496,7 +568,7 @@ export class Game {
     // the wind slams the window shut
     this.shot(new THREE.Vector3(10.5, 4.2, -9.4), new THREE.Vector3(8.8, 4.3, -11.8));
     await this.wait(0.5);
-    w.window.position.y = 4.4;
+    w.window.position.y = w.windowClosedY;
     audio.slam();
     this.shake = 0.5;
     d.squash = 1;
@@ -529,7 +601,7 @@ export class Game {
     await this.say("Хозяйка", "Милена?! Кис-кис-кис!");
     await this.say("Милена", "…И ещё дождь. Прекрасно. Просто прекрасно. Прячусь в подвал.");
     m.scriptedTarget = null;
-    if (this.count === 3) {
+    if (this.party.includes(this.cats.pixel!)) {
       const px = this.cats.pixel!;
       px.root.position.copy(w.spawn.pixel);
       px.yaw = 0;
@@ -539,11 +611,11 @@ export class Game {
     this.save.flags.intro = true;
     this.save.checkpoint = "start";
     // setup after (also runs when skipped)
-    w.window.position.y = 4.4;
+    w.window.position.y = w.windowClosedY;
     w.ball.position.copy(ballTo);
     d.root.position.copy(w.spawn.dymok);
     d.yaw = 0;
-    if (this.count === 1) {
+    if (!this.puppets.has("milena")) {
       m.root.position.copy(w.spawn.milenaBasement);
       m.yaw = -Math.PI / 2;
     } else m.root.position.set(0.3, 0.05, 9.8);
@@ -568,7 +640,7 @@ export class Game {
     this.shot(new THREE.Vector3(0.4, -2, -14.3), new THREE.Vector3(-2.15, -2.4, -16), false, 1.5);
     await this.say("Дымок", "Решётка застряла? Отойди-ка. Сейчас будет… мощно.");
     await this.say("Милена", "Если сдвинешь её хоть чуть-чуть — я пролезу и открою защёлку.");
-    if (this.count === 3) await this.say("Пиксель", "А я… буду морально поддерживать. Громко.");
+    if (this.party.includes(this.cats.pixel!)) await this.say("Пиксель", "А я… буду морально поддерживать. Громко.");
     this.save.flags.met = true;
     this.world.rain.visible = false;
     this.setupCompanions();
@@ -583,7 +655,7 @@ export class Game {
     await this.say("Милена", "Пушистый. Я поняла.");
     this.addFish(20, "Совместное задание");
     this.save.flags.grateOpen = true;
-    if (this.count === 1) this.ui.toast("Теперь можно переключаться между котами: Tab или портреты слева. G — «за мной / жди».", 5000);
+    if (this.mode === "solo") this.ui.toast("Tab или портрет слева — сменить кота. G — «за мной / жди».", 5000);
     void d;
     void m;
     this.refreshPortraits();
@@ -625,17 +697,24 @@ export class Game {
   }
 
   // ------------------------------------------------------------ gameplay helpers
+  private persist() {
+    if (this.mode !== "client") writeSave(this.save);
+  }
+
   private addFish(n: number, why?: string) {
     this.save.fish += n;
     this.ui.setFish(this.save.fish);
     if (why) this.ui.toast(`+${n} 🐟 — ${why}`);
     audio.fish();
-    writeSave(this.save);
+    this.persist();
   }
 
   private objective(): { text: string; target: THREE.Vector3 | null } {
     const f = this.save.flags;
     const lead = this.players[0]?.cat.root.position;
+    if (!f.met && this.players[0]?.cat.def.id === "milena") {
+      return { text: "Милена спряталась от дождя в подвале. Кто-то шумит у лестницы — осмотрись", target: this.cats.dymok!.root.position.y < -1 ? this.cats.dymok!.root.position : new THREE.Vector3(0, -2.8, -12.8) };
+    }
     if (!f.met) {
       const inBasement = lead && lead.y < -1;
       return { text: "Найди другой вход домой — спустись в подвал (лестница во дворе)", target: inBasement ? this.cats.milena!.root.position : new THREE.Vector3(0, -1, -10.5) };
@@ -647,17 +726,20 @@ export class Game {
     return { text: "Свободная прогулка: собирай рыбки и исследуй двор", target: null };
   }
 
-  private tryInteract(p: Player) {
-    const cat = p.cat;
+  private tryInteract(cat: Cat) {
     const it = this.nearestInteractable(cat);
     if (!it) {
       if (this.hiddenInBox === cat) this.exitBox();
       return;
     }
     const w = this.world;
+    if (!this.authority && ["grate_push", "latch", "elevator", "coop"].includes(it.id)) {
+      this.net?.send({ t: "ev", e: "interact", id: it.id, cat: cat.def.id });
+      return;
+    }
     switch (it.id) {
       case "shop":
-        this.openShop(p);
+        this.openShop();
         break;
       case "cardboard":
         if (this.hiddenInBox === cat) this.exitBox();
@@ -685,7 +767,7 @@ export class Game {
             mesh.position.z = from + (-17.2 - from) * k;
           };
           w.animated.push(anim);
-          if (!this.save.flags.grateOpen) this.runCutscene(() => this.grateOpenedCutscene());
+          if (!this.save.flags.grateOpen) this.cutscene("grate");
         }
         break;
       case "elevator": {
@@ -693,6 +775,7 @@ export class Game {
         if (e.moving) break;
         e.target = e.y < 4 ? e.top : e.bottom;
         e.moving = true;
+        if (this.mode === "host") this.net?.send({ t: "fx", k: "elevator", target: e.target });
         audio.clank();
         this.ui.toast("Лифтовая музыка. Коты ненавидят ждать.");
         break;
@@ -708,7 +791,7 @@ export class Game {
           this.ui.toast("Паутинные браслеты найдены! Держи ПКМ / R рядом со светящимися крюками.", 5000);
           this.addFish(10);
           this.save.checkpoint = "roofA";
-          writeSave(this.save);
+          this.persist();
           this.later(0.6, () => this.ui.subtitle(cat.def.name, "Кто-то тут явно пересмотрел кино про пауков.", SPEAKER_COLORS[cat.def.name]));
           this.later(4, () => this.ui.subtitle(null, null));
         }
@@ -737,7 +820,7 @@ export class Game {
     return best;
   }
 
-  private openShop(p: Player) {
+  private openShop() {
     this.state = "modal";
     document.exitPointerLock?.();
     audio.play("shop");
@@ -753,6 +836,7 @@ export class Game {
       },
       buyCostume: (c) => {
         if (this.save.fish < c.price) return false;
+        if (!this.authority) this.net?.send({ t: "ev", e: "buy", kind: "costume", id: c.id });
         this.save.fish -= c.price;
         this.save.owned.push(c.id);
         this.save.equipped[c.cat] = c.id;
@@ -760,22 +844,23 @@ export class Game {
         this.cats[c.cat]!.setCostume(c.id);
         this.ui.setFish(this.save.fish);
         audio.fanfare();
-        writeSave(this.save);
+        this.persist();
         return true;
       },
       equip: (c, catId) => {
         this.save.equipped[catId] = c?.id ?? null;
         this.cats[catId as CatId]!.setCostume(c?.id ?? null);
-        writeSave(this.save);
+        this.persist();
       },
       buyCans: (qty, unit) => {
         const total = qty * unit;
         if (this.save.fish < total) return false;
+        if (!this.authority) this.net?.send({ t: "ev", e: "buy", kind: "cans", qty, unit });
         this.save.fish -= total;
         this.save.cans += qty;
         this.ui.setFish(this.save.fish);
         audio.fish();
-        writeSave(this.save);
+        this.persist();
         return true;
       },
       close: () => {
@@ -785,7 +870,6 @@ export class Game {
         this.lastMusic = "";
       },
     });
-    void p;
   }
 
   private scarePigeon(pg: (typeof this.world.pigeons)[number], from: THREE.Vector3) {
@@ -814,7 +898,7 @@ export class Game {
     this.time += dt;
     furWind.value += dt * 2;
     for (const a of this.world.animated) a(this.time, dt);
-    const inputs = this.players.map((p, i) => this.input.read(i, this.count));
+    const inputs = this.players.map((_, i) => this.input.read(i, 1));
     const p0 = inputs[0];
 
     if (this.state === "play" && p0?.pressed.has("pause")) this.openPause();
@@ -837,13 +921,17 @@ export class Game {
       }
       for (const c of this.party) c.update(dt, null, 0, this.world.physics, [], false);
       this.karniz.cat.mixer.update(dt);
-    } else if (this.state === "play") {
-      this.updatePlay(dt, inputs);
+    } else if (this.state === "play" || ((this.state === "paused" || this.state === "modal") && this.mode !== "solo")) {
+      // online the world keeps running while a menu is open
+      this.updatePlay(dt, this.state === "play" ? inputs : inputs.map(() => this.input.idle()));
     }
+    if (this.state !== "cutscene") for (const id of this.puppets) this.cats[id]!.updateRemote(dt);
+    this.netTick(dt);
     this.plombir.mixer.update(dt);
     this.updatePigeons(dt);
     this.updateCars(dt);
     this.updateElevator(dt);
+    this.switchBlend = Math.max(0, this.switchBlend - dt * 1.1);
     const focus = this.players[0]?.cat.root.position ?? new THREE.Vector3();
     this.world.updateRain(dt, focus);
     this.sun.target.position.copy(focus);
@@ -878,17 +966,17 @@ export class Game {
         p.yaw += d * (1 - Math.exp(-1.5 * dt));
       }
       if (inp.pressed.has("fp")) p.fp = !p.fp;
-      if (inp.pressed.has("switch") && this.count === 1) {
+      if (inp.pressed.has("switch") && this.mode === "solo") {
         const i = this.party.indexOf(cat);
         this.switchTo(this.party[(i + 1) % this.party.length]);
       }
-      if (inp.pressed.has("command") && this.count === 1 && f.grateOpen) {
+      if (inp.pressed.has("command") && this.mode === "solo" && f.met) {
         for (const c of this.party) if (c !== p.cat) c.ai = c.ai === "follow" ? "wait" : "follow";
         const other = this.party.find((c) => c !== p.cat)!;
         this.ui.toast(`${other.def.name}: ${other.ai === "follow" ? "«Иду за тобой!»" : "«Жду тут. Не забудь меня.»"}`);
         this.refreshPortraits();
       }
-      if (inp.pressed.has("interact")) this.tryInteract(p);
+      if (inp.pressed.has("interact")) this.tryInteract(cat);
 
       const ev = p.cat.update(dt, inp, p.yaw, w.physics, w.anchors, !!f.bracelets);
       if (this.hiddenInBox === cat) {
@@ -897,8 +985,14 @@ export class Game {
         if (cat.moving > 0.3 && Math.random() < dt * 0.3) this.ui.toast("*коробка подозрительно шуршит*", 1500);
       }
       if (ev.landed && ev.landed > 13) this.ui.toast("Кошки всегда приземляются на лапы. Почти всегда.", 2200);
-      if (ev.attacked) this.onAttack(cat);
-      if (ev.ability) this.onAbility(cat, ev.ability);
+      if (ev.attacked) {
+        if (this.authority) this.onAttack(cat);
+        else this.net?.send({ t: "ev", e: "attack", cat: cat.def.id });
+      }
+      if (ev.ability) {
+        if (this.authority) this.onAbility(cat, ev.ability);
+        else this.net?.send({ t: "ev", e: "ability", kind: ev.ability, cat: cat.def.id });
+      }
       p.prompt = "";
       const it = this.nearestInteractable(cat);
       if (it) p.prompt = `${KEY_LABEL[p.idx]} — ${it.id === "cardboard" && this.hiddenInBox === cat ? "Вылезти из коробки" : it.prompt}`;
@@ -906,26 +1000,32 @@ export class Game {
       if (w.hideSpots.some((h) => h.containsPoint(cat.root.position.clone().add(new THREE.Vector3(0, 0.1, 0))))) p.prompt = "Ты спрятался под машиной. Тебя никто не видит.";
     }
     if (this.input.wasPressed("KeyH")) this.eatCan(this.players[0].cat);
-    this.updateCompanions(dt);
+    if (this.authority) this.updateCompanions(dt);
+    for (const pk of w.pickups) if (!pk.taken) pk.mesh.rotation.y += dt * 2;
 
-    // pickups & checkpoints
+    // pickups & checkpoints: each machine checks the cats it simulates
     for (const c of this.party) {
+      if (this.puppets.has(c.def.id)) continue;
       for (const pk of w.pickups) {
         if (pk.taken) continue;
-        pk.mesh.rotation.y += dt * 2;
         pk.mesh.position.y = pk.pos.y + Math.sin(this.time * 3 + pk.pos.x) * 0.04;
         if (pk.pos.distanceTo(c.root.position.clone().add(new THREE.Vector3(0, 0.2, 0))) < 0.45) {
           pk.taken = true;
           pk.mesh.visible = false;
-          this.save.taken.push(pk.id);
-          this.addFish(pk.value, pk.value > 1 ? "Тайник!" : undefined);
+          if (this.authority) {
+            this.save.taken.push(pk.id);
+            this.addFish(pk.value, pk.value > 1 ? "Тайник!" : undefined);
+          } else {
+            audio.fish();
+            this.net?.send({ t: "ev", e: "pickup", id: pk.id });
+          }
         }
       }
       for (const cp of w.checkpoints) {
         if (cp.pos.distanceTo(c.root.position) < 0.7 && this.save.checkpoint !== cp.id) {
           this.save.checkpoint = cp.id;
           this.party.forEach((x) => (x.health = x.maxHealth));
-          writeSave(this.save);
+          this.persist();
           if (this.seenCheckpoint !== cp.id) this.ui.toast(`Лежанка «${cp.name}»: прогресс сохранён, здоровье восстановлено`);
           this.seenCheckpoint = cp.id;
         }
@@ -933,15 +1033,19 @@ export class Game {
       if (c.health <= 0 || c.root.position.y < -25) this.respawn(c);
     }
 
-    // story triggers
+    if (!this.authority) {
+      this.ui.boss(this.bossActive ? this.karniz.hp : null, this.karniz.maxHp);
+      return;
+    }
+    // story triggers (authoritative copy only)
     const d = this.cats.dymok!, m = this.cats.milena!;
     if (!f.met && d.root.position.distanceTo(m.root.position) < 3 && d.root.position.y < -1 && m.root.position.y < -1) {
-      this.runCutscene(() => this.meetCutscene());
+      this.cutscene("meet");
       return;
     }
     if (!f.bossDefeated && !this.bossActive && this.party.some((c) => w.bossArena.containsPoint(c.root.position) && c.body.grounded)) {
       this.bossActive = true;
-      this.runCutscene(() => this.bossIntro()).then(() => this.karniz.start());
+      this.cutscene("bossIntro").then(() => this.karniz.start());
       return;
     }
     if (this.bossActive) {
@@ -950,14 +1054,17 @@ export class Game {
       this.ui.boss(this.karniz.hp, this.karniz.maxHp);
       if (this.karniz.state === "defeated") {
         this.bossActive = false;
-        this.runCutscene(() => this.bossDefeat()).then(() => {
-          this.state = "modal";
-          this.ui.endCard(() => (this.state = "play"));
-        });
+        this.cutscene("bossDefeat").then(() => this.showEndCard());
       }
     } else {
       this.karniz.update(dt, [], w, this.players[0].camera);
     }
+  }
+
+  private showEndCard() {
+    this.state = "modal";
+    document.exitPointerLock?.();
+    this.ui.endCard(() => (this.state = "play"));
   }
 
   private eatCan(cat: Cat) {
@@ -973,7 +1080,7 @@ export class Game {
     cat.health = cat.maxHealth;
     audio.fish();
     this.ui.toast(`${cat.def.name} съел сардины. Ням! (осталось ${this.save.cans})`);
-    writeSave(this.save);
+    this.persist();
   }
 
   private respawn(c: Cat) {
@@ -1029,7 +1136,7 @@ export class Game {
   private updateCompanions(dt: number) {
     const leader = this.players[0].cat;
     for (const c of this.party) {
-      if (this.players.some((p) => p.cat === c)) continue;
+      if (this.players.some((p) => p.cat === c) || this.puppets.has(c.def.id)) continue;
       let inp: PlayerInput | null = null;
       if (c.ai === "follow") {
         const to = leader.root.position.clone().sub(c.root.position);
@@ -1151,12 +1258,12 @@ export class Game {
       },
       tracking: (v) => {
         this.save.tracking = v;
-        writeSave(this.save);
+        this.persist();
       },
       quality: (q) => this.setQuality(q),
       music: (v) => audio.setMusicVolume(v),
       menu: () => {
-        writeSave(this.save);
+        this.persist();
         this.ui.closeModal();
         this.showMenu();
       },
@@ -1166,6 +1273,294 @@ export class Game {
         location.reload();
       },
     });
+  }
+
+  // ------------------------------------------------------------ online co-op
+  private async startHost() {
+    const net = new Net();
+    const code = newRoomCode();
+    this.ui.loading("Создаём комнату…");
+    try {
+      await net.hostRoom(code);
+    } catch (e) {
+      this.ui.loading(null);
+      this.ui.toast(String((e as Error).message), 5000);
+      this.showMenu();
+      return;
+    }
+    this.ui.loading(null);
+    this.net = net;
+    this.peerCats.clear();
+    this.puppets.clear();
+    net.onMessage = (m, from) => this.onNet(m, from);
+    net.onPeerJoin = (id) => this.onPeerJoin(id);
+    net.onPeerLeave = (id) => this.onPeerLeave(id);
+    this.start("host", loadSave(), "dymok");
+    this.updateRoomBadge();
+    this.ui.toast(`Комната ${code} создана. Отправьте друзьям ссылку (кнопка слева сверху).`, 6000);
+  }
+
+  private async startClient(code: string) {
+    const net = new Net();
+    this.ui.loading(`Подключаемся к комнате ${code.toUpperCase()}…`);
+    try {
+      await net.joinRoom(code);
+    } catch (e) {
+      this.ui.loading(null);
+      this.ui.toast(String((e as Error).message), 5000);
+      this.showMenu();
+      return;
+    }
+    this.net = net;
+    net.onMessage = (m, from) => this.onNet(m, from);
+    net.onDisconnect = () => {
+      this.ui.toast("Хозяин комнаты отключился.", 5000);
+      this.showMenu();
+    };
+    net.send({ t: "hello" });
+  }
+
+  /** A connection opened; the seat is assigned when the client says hello (its handlers are ready then). */
+  private onPeerJoin(peerId: string) {
+    void peerId;
+  }
+
+  private seatPeer(peerId: string) {
+    if (this.peerCats.has(peerId)) return;
+    const taken = new Set(this.peerCats.values());
+    const cat = (["milena", "pixel"] as CatId[]).find((c) => !taken.has(c));
+    if (!cat) {
+      this.net?.sendTo(peerId, { t: "full" });
+      return;
+    }
+    this.peerCats.set(peerId, cat);
+    this.puppets.add(cat);
+    const c = this.cats[cat]!;
+    c.ai = "none";
+    c.damageProxy = (n, from) => this.net?.sendTo(peerId, { t: "dmg", n, from: from ? from.toArray() : null });
+    if (cat === "pixel" && !this.party.includes(c)) {
+      this.party.push(c);
+      c.root.visible = true;
+      c.root.position.copy(this.world.spawn.pixel);
+    }
+    this.net?.sendTo(peerId, { t: "welcome", you: cat, save: this.save, roster: [...this.peerCats.values()] });
+    this.ui.toast(`В игру вошёл игрок: ${c.def.name}`, 3000);
+    audio.meow(c.def.pitch, 0.8);
+    this.updateRoomBadge();
+    this.refreshPortraits();
+    this.sendWorld();
+  }
+
+  private onPeerLeave(peerId: string) {
+    const cat = this.peerCats.get(peerId);
+    if (!cat) return;
+    this.peerCats.delete(peerId);
+    this.puppets.delete(cat);
+    const c = this.cats[cat]!;
+    c.damageProxy = undefined;
+    if (cat === "pixel") {
+      this.party = this.party.filter((x) => x !== c);
+      c.root.visible = false;
+    } else c.ai = this.save.flags.met ? "follow" : "wait";
+    this.ui.toast(`${c.def.name}: игрок вышел`, 3000);
+    this.updateRoomBadge();
+    this.refreshPortraits();
+  }
+
+  private updateRoomBadge() {
+    if (!this.net) return this.ui.roomBadge(null);
+    // client: other clients + host + me
+    const players = this.mode === "host" ? this.peerCats.size + 1 : this.peerCats.size + 2;
+    this.ui.roomBadge(this.net.code, Math.min(3, players));
+  }
+
+  private stateOf(c: Cat): NetMsg {
+    const p = c.root.position;
+    return { t: "state", id: c.def.id, p: [+p.x.toFixed(3), +p.y.toFixed(3), +p.z.toFixed(3)], y: +c.yaw.toFixed(3), a: c.current, v: +c.moving.toFixed(2), sn: c.sneaking, hp: c.health, cos: c.costume, vis: c.model.visible, sw: c.anchor ? c.anchor.toArray() : null };
+  }
+
+  private netTick(dt: number) {
+    if (!this.net || this.state === "menu") return;
+    this.netTimer += dt;
+    this.worldTimer += dt;
+    if (this.netTimer >= 0.05) {
+      this.netTimer = 0;
+      if (this.mode === "host") {
+        for (const c of [...this.party, this.karniz.cat]) if (!this.puppets.has(c.def.id)) this.net.send(this.stateOf(c));
+      } else if (this.players[0]) this.net.send(this.stateOf(this.players[0].cat));
+    }
+    if (this.mode === "host" && this.worldTimer >= 0.25) this.sendWorld();
+  }
+
+  private sendWorld() {
+    if (this.mode !== "host" || !this.net) return;
+    this.worldTimer = 0;
+    const e = this.world.elevator;
+    this.net.send({
+      t: "world", flags: this.save.flags, fish: this.save.fish, cans: this.save.cans, owned: this.save.owned,
+      taken: this.save.taken, cp: this.save.checkpoint, grate: this.world.grate.state,
+      el: { y: e.y, target: e.target, moving: e.moving }, boss: { active: this.bossActive, hp: this.karniz.hp },
+    });
+  }
+
+  private applyGrate(state: "stuck" | "shifted" | "open") {
+    const g = this.world.grate;
+    if (g.state === state) return;
+    g.state = state;
+    g.collider.enabled = state !== "open";
+    if (state === "shifted") {
+      g.collider.box.max.z = -15.64;
+      g.mesh.position.z = -16.24;
+      audio.slam();
+    }
+    if (state === "open") g.mesh.position.z = -17.2;
+    this.world.interactables.find((i) => i.id === "latch")!.enabled = state === "shifted";
+    this.world.interactables.find((i) => i.id === "grate_push")!.enabled = state === "stuck";
+  }
+
+  private onNet(m: NetMsg, from: string) {
+    const net = this.net;
+    if (!net) return;
+    switch (m.t) {
+      case "hello":
+        if (this.mode === "host") this.seatPeer(from);
+        break;
+      case "welcome": {
+        const you = m.you as CatId;
+        const roster = m.roster as CatId[];
+        this.peerCats.clear();
+        for (const c of roster) if (c !== you) this.peerCats.set(c, c);
+        // everything except our own cat is simulated elsewhere and arrives as packets
+        this.puppets = new Set((["dymok", "milena", "pixel", "karniz"] as CatId[]).filter((c) => c !== you && (c !== "pixel" || roster.includes("pixel"))));
+        this.ui.loading(null);
+        this.start("client", m.save as SaveData, you);
+        this.updateRoomBadge();
+        this.refreshPortraits();
+        this.ui.toast(`Вы в комнате ${net.code}. Ваш кот: ${this.cats[you]!.def.name}`, 5000);
+        break;
+      }
+      case "full":
+        this.ui.toast("В комнате уже 3 игрока.", 5000);
+        this.showMenu();
+        break;
+      case "state": {
+        const id = m.id as CatId;
+        if (this.mode === "host") net.send(m, from); // relay to the other clients
+        if (this.players[0]?.cat.def.id === id) return;
+        const c = this.cats[id];
+        if (!c) return;
+        this.puppets.add(id);
+        if (id === "pixel" && !this.party.includes(c)) {
+          this.party.push(c);
+          c.root.visible = true;
+          this.refreshPortraits();
+        }
+        c.pushRemote(m.p as [number, number, number], m.y as number, m.a as string, m.v as number, !!m.sn);
+        c.health = m.hp as number;
+        if (id !== "karniz" && ((m.cos as string | null) ?? null) !== c.costume) c.setCostume((m.cos as string | null) ?? null);
+        c.model.visible = m.vis !== false;
+        if (m.sw) {
+          c.rope.geometry.setFromPoints([c.root.position.clone().add(new THREE.Vector3(0, 0.25, 0)), new THREE.Vector3(...(m.sw as [number, number, number]))]);
+          c.rope.visible = true;
+        } else c.rope.visible = false;
+        break;
+      }
+      case "world": {
+        if (this.mode !== "client") return;
+        const fishBefore = this.save.fish;
+        Object.assign(this.save, { flags: m.flags, fish: m.fish, cans: m.cans, owned: m.owned, taken: m.taken, checkpoint: m.cp });
+        if (fishBefore !== this.save.fish) this.ui.setFish(this.save.fish);
+        for (const pk of this.world.pickups) {
+          if ((m.taken as string[]).includes(pk.id) && !pk.taken) {
+            pk.taken = true;
+            pk.mesh.visible = false;
+          }
+        }
+        this.applyGrate(m.grate as "stuck" | "shifted" | "open");
+        const el = m.el as { y: number; target: number; moving: boolean };
+        const e = this.world.elevator;
+        if (!e.moving && !el.moving && Math.abs(e.y - el.y) > 0.05) {
+          const dy = el.y - e.y;
+          e.y = el.y;
+          e.target = el.target;
+          e.mesh.position.y = el.y;
+          e.collider.box.min.y += dy;
+          e.collider.box.max.y += dy;
+        }
+        const f = this.save.flags;
+        this.world.interactables.find((i) => i.id === "coop")!.enabled = !f.bracelets;
+        this.world.rain.visible = !!f.intro && !f.met;
+        const b = m.boss as { active: boolean; hp: number };
+        this.bossActive = b.active;
+        this.karniz.hp = b.hp;
+        break;
+      }
+      case "fx":
+        if (m.k === "elevator") {
+          this.world.elevator.target = m.target as number;
+          this.world.elevator.moving = true;
+          audio.clank();
+        }
+        break;
+      case "cut":
+        if (this.mode === "client") {
+          this.runCutscene(this.scripts()[m.name as string]).then(() => {
+            if (m.name === "bossDefeat") this.showEndCard();
+          });
+        }
+        break;
+      case "toast":
+        this.ui.toast(m.text as string, 2200);
+        break;
+      case "dmg": {
+        const fr = m.from as number[] | null;
+        this.players[0]?.cat.damage(m.n as number, fr ? new THREE.Vector3(fr[0], fr[1], fr[2]) : undefined);
+        break;
+      }
+      case "ev": {
+        if (this.mode !== "host") return;
+        const cat = this.cats[this.peerCats.get(from)!];
+        if (!cat) return;
+        if (m.e === "interact") this.tryInteractId(cat, m.id as string);
+        else if (m.e === "attack") this.onAttack(cat);
+        else if (m.e === "ability") this.onAbility(cat, m.kind as string);
+        else if (m.e === "pickup") {
+          const pk = this.world.pickups.find((x) => x.id === m.id);
+          if (pk && !this.save.taken.includes(pk.id)) {
+            pk.taken = true;
+            pk.mesh.visible = false;
+            this.save.taken.push(pk.id);
+            this.addFish(pk.value, `${cat.def.name} нашёл рыбку`);
+          }
+        } else if (m.e === "buy") {
+          if (m.kind === "costume") {
+            const c = COSTUMES.find((x) => x.id === m.id);
+            if (c && this.save.fish >= c.price && !this.save.owned.includes(c.id)) {
+              this.save.fish -= c.price;
+              this.save.owned.push(c.id);
+              this.save.flags.costume = true;
+            }
+          } else {
+            const total = (m.qty as number) * (m.unit as number);
+            if (this.save.fish >= total) {
+              this.save.fish -= total;
+              this.save.cans += m.qty as number;
+            }
+          }
+          this.ui.setFish(this.save.fish);
+          this.persist();
+        }
+        this.sendWorld();
+        break;
+      }
+    }
+  }
+
+  /** Host-side interaction on behalf of a remote player's cat. */
+  private tryInteractId(cat: Cat, id: string) {
+    const it = this.world.interactables.find((i) => i.id === id);
+    if (!it || !it.enabled || it.pos.distanceTo(cat.root.position) > it.radius + 0.6) return;
+    this.tryInteract(cat);
   }
 
   // ------------------------------------------------------------ render
@@ -1186,8 +1581,14 @@ export class Game {
     const hit = this.world.physics.raycast(target, dir, want + 0.2, "car");
     const d = Math.max(0.25, Math.min(want, hit - 0.18));
     const desired = target.clone().addScaledVector(dir, d);
-    cam.position.lerp(desired, 1 - Math.exp(-(d < want ? 30 : 12) * dt));
-    if (cam.position.distanceTo(desired) > 3) cam.position.copy(desired);
+    if (this.switchBlend > 0) {
+      // soul-swap: glide over to the new cat along a raised arc
+      desired.y += Math.sin(this.switchBlend * Math.PI) * 1.2;
+      cam.position.lerp(desired, 1 - Math.exp(-4 * dt));
+    } else {
+      cam.position.lerp(desired, 1 - Math.exp(-(d < want ? 30 : 12) * dt));
+      if (cam.position.distanceTo(desired) > 3) cam.position.copy(desired);
+    }
     cam.lookAt(target);
   }
 
@@ -1199,7 +1600,6 @@ export class Game {
   }
 
   private render(dt: number) {
-    const W = innerWidth, H = innerHeight;
     if (this.state === "menu" || this.state === "cutscene" || !this.started) {
       if (this.state === "menu") {
         const t = this.time * 0.05;
@@ -1213,9 +1613,7 @@ export class Game {
         this.shake -= dt;
         this.cutCam.position.add(new THREE.Vector3((Math.random() - 0.5) * this.shake * 0.2, (Math.random() - 0.5) * this.shake * 0.2, 0));
       }
-      this.renderer.setViewport(0, 0, W, H);
-      this.renderer.setScissor(0, 0, W, H);
-      this.renderer.render(this.scene, this.cutCam);
+      this.post.render(this.scene, this.cutCam);
       return;
     }
     const obj = this.save.tracking ? this.objective() : { text: this.objective().text, target: null };
@@ -1223,13 +1621,9 @@ export class Game {
     for (const p of this.players) {
       this.placeCamera(p, dt);
       if (this.shake > 0) p.camera.position.add(new THREE.Vector3((Math.random() - 0.5) * this.shake * 0.1, (Math.random() - 0.5) * this.shake * 0.1, 0));
-      const vx = Math.floor(p.rect.x * W), vw = Math.floor(p.rect.w * W);
-      const vh = Math.floor(p.rect.hgt * H), vy = H - Math.floor(p.rect.y * H) - vh;
-      this.renderer.setViewport(vx, vy, vw, vh);
-      this.renderer.setScissor(vx, vy, vw, vh);
       const hideSelf = p.fp;
       if (hideSelf) p.cat.model.visible = false;
-      this.renderer.render(this.scene, p.camera);
+      this.post.render(this.scene, p.camera);
       if (hideSelf) p.cat.model.visible = this.hiddenInBox !== p.cat;
       const c = p.cat;
       const ab = c.def.ability === "dash" ? "рывок" : c.def.ability === "hiss" ? "шипение-царапка" : "шипение · двойной прыжок";

@@ -83,6 +83,10 @@ export class InputManager {
     this.canvas.requestPointerLock?.();
   }
 
+  idle(): PlayerInput {
+    return { moveX: 0, moveY: 0, lookX: 0, lookY: 0, run: false, sneak: false, jumpHeld: false, swingHeld: false, pressed: new Set() };
+  }
+
   wasPressed(code: string) {
     return this.edge.has(code);
   }

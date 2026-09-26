@@ -1,6 +1,9 @@
 import * as THREE from "three";
 import { PhysicsWorld, type Collider } from "../engine/physics";
 import * as T from "../engine/textures";
+import { batchStatic, buildFacade, centersThrough } from "./facade";
+import { RoundedBoxGeometry } from "three/examples/jsm/geometries/RoundedBoxGeometry.js";
+import { mergeVertices } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 
 export interface Interactable {
   id: string;
@@ -82,6 +85,8 @@ export class World {
   elevator!: { mesh: THREE.Group; collider: Collider; y: number; target: number; bottom: number; top: number; moving: boolean };
   coopDoor!: THREE.Object3D;
   window!: THREE.Object3D;
+  readonly windowOpenY = 5.15;
+  readonly windowClosedY = 4.34;
   ball!: THREE.Mesh;
   rain!: THREE.LineSegments;
   sun!: THREE.DirectionalLight;
@@ -109,6 +114,7 @@ export class World {
       mesh.position.set((x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2);
       mesh.castShadow = sy > 0.05 && Math.max(sx, sz) < 40;
       mesh.receiveShadow = true;
+      mesh.userData.batch = true;
       this.scene.add(mesh);
     }
     let collider: Collider | undefined;
@@ -150,6 +156,7 @@ export class World {
     this.buildRoofA();
     this.buildRoofB();
     this.buildStreet();
+    this.buildBrownstones();
     this.buildSkyline();
     this.buildRain();
     this.regions.push(
@@ -163,6 +170,7 @@ export class World {
     this.spawn.milenaStreet = new THREE.Vector3(-4, 0.02, 16.3);
     this.spawn.milenaBasement = new THREE.Vector3(3.5, -2.98, -17.5);
     this.spawn.pixel = new THREE.Vector3(2, 0.02, 10.5);
+    batchStatic(this.scene);
   }
 
   private buildGround() {
@@ -195,31 +203,6 @@ export class World {
     }
   }
 
-  private windowRow(x0: number, x1: number, z: number, y: number, face: 1 | -1, litChance = 0.5, axis: "z" | "x" = "z") {
-    let seed = Math.floor(x0 * 13 + y * 7 + z);
-    const r = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
-    for (let x = x0; x <= x1; x += 2.6) {
-      const lit = r() < litChance;
-      const w = new THREE.Mesh(new THREE.PlaneGeometry(1.1, 1.6), lit ? this.M.glassLit() : this.M.glassDark());
-      const frame = new THREE.Mesh(new THREE.BoxGeometry(1.35, 1.85, 0.06), this.M.trim());
-      const sill = new THREE.Mesh(new THREE.BoxGeometry(1.5, 0.08, 0.25), this.M.trim());
-      if (axis === "z") {
-        w.position.set(x, y, z + face * 0.05);
-        w.rotation.y = face > 0 ? 0 : Math.PI;
-        frame.position.set(x, y, z);
-        sill.position.set(x, y - 0.95, z + face * 0.1);
-      } else {
-        w.position.set(z + face * 0.05, y, x);
-        w.rotation.y = face > 0 ? Math.PI / 2 : -Math.PI / 2;
-        frame.position.set(z, y, x);
-        frame.rotation.y = Math.PI / 2;
-        sill.position.set(z + face * 0.1, y - 0.95, x);
-        sill.rotation.y = Math.PI / 2;
-      }
-      this.scene.add(frame, w, sill);
-    }
-  }
-
   private buildNorthBuilding() {
     const b = this.M.brickRed();
     // leaves the basement (y<0), and an elevator shaft x -11..-9, z -19..-17
@@ -227,18 +210,36 @@ export class World {
     this.box(-9, 0, -20, 15, 12, -12, b);
     this.box(-11, 0, -17, -9, 12, -12, b);
     this.box(-11, 0, -20, -9, 12, -19.2, b);
-    // cornice
-    this.box(-15.2, 11.6, -12.3, 15.2, 12, -11.9, this.M.trim(), false);
-    for (const y of [1.8, 5.2, 8.4]) this.windowRow(-13.5, 13.5, -11.98, y, 1, 0.45);
-    // Dymok's apartment window by fire escape platform 1 (opens/closes in intro)
-    const frame = new THREE.Mesh(new THREE.BoxGeometry(1.4, 1.4, 0.1), this.M.trim());
-    frame.position.set(8.8, 4.4, -11.95);
-    const glow = new THREE.Mesh(new THREE.PlaneGeometry(1.2, 1.2), mat("aptglow", () => new THREE.MeshStandardMaterial({ color: 0x3a2a18, emissive: 0xffb866, emissiveIntensity: 1.6 })));
-    glow.position.set(8.8, 4.4, -11.93);
-    const pane = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.62, 0.04), mat("pane", () => new THREE.MeshPhysicalMaterial({ color: 0x9fb7c9, roughness: 0.05, transparent: true, opacity: 0.35 })));
-    pane.position.set(8.8, 5.05, -11.88); // raised sash = open window
+    buildFacade(this.scene, this.physics, {
+      axis: "z", plane: -12, dir: 1, from: -15, to: 15, top: 12, seed: 3, lit: 0.45, ac: 0.15, sillColliders: true,
+      centers: centersThrough(-15, 15, 2.6, 8.8),
+      rows: [{ sill: 0.9, height: 1.7 }, { sill: 3.9, height: 1.7 }, { sill: 7.1, height: 1.7 }, { sill: 10.2, height: 1.1 }],
+      wall: this.M.brickRed(), custom: new Set([`${centersThrough(-15, 15, 2.6, 8.8).indexOf(8.8)}:1`]),
+      // keep the basement areaway and the fire-escape awning clear of ground-floor windows
+      blank: (i, r) => r === 0 && [-1.6, 1.0, 6.2].includes(+centersThrough(-15, 15, 2.6, 8.8)[i].toFixed(1)),
+    });
+    // Dymok's apartment window: warm room, a sash the wind can slam shut
+    const room = new THREE.Mesh(new THREE.PlaneGeometry(1.0, 1.6), mat("aptroom", () => {
+      const t = T.roomInterior(9);
+      return new THREE.MeshStandardMaterial({ map: t, emissiveMap: t, emissive: 0xffffff, emissiveIntensity: 1.3 });
+    }));
+    room.position.set(8.8, 4.75, -11.97);
+    const frameM = mat("aptframe", () => new THREE.MeshStandardMaterial({ color: 0xe8e2d4, roughness: 0.6 }));
+    for (const [w, h, x, y] of [[1.1, 0.06, 8.8, 3.93], [1.1, 0.06, 8.8, 5.57], [0.06, 1.7, 8.28, 4.75], [0.06, 1.7, 9.32, 4.75]]) {
+      const f = new THREE.Mesh(new THREE.BoxGeometry(w, h, 0.08), frameM);
+      f.position.set(x, y, -11.94);
+      this.scene.add(f);
+    }
+    const pane = new THREE.Group();
+    const glass = new THREE.Mesh(new THREE.BoxGeometry(0.98, 0.78, 0.02), mat("pane", () => new THREE.MeshPhysicalMaterial({ color: 0xa9c1d4, roughness: 0.05, transparent: true, opacity: 0.28 })));
+    const sash = new THREE.Mesh(new THREE.BoxGeometry(1.0, 0.8, 0.05), frameM);
+    sash.scale.set(1, 1, 1);
+    const inner = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.7, 0.06), glass.material);
+    pane.add(glass, inner);
+    pane.add(new THREE.Mesh(new THREE.BoxGeometry(1.0, 0.05, 0.05), frameM).translateY(0.38), new THREE.Mesh(new THREE.BoxGeometry(1.0, 0.05, 0.05), frameM).translateY(-0.38));
+    pane.position.set(8.8, this.windowOpenY, -11.9);
     this.window = pane;
-    this.scene.add(frame, glow, pane);
+    this.scene.add(room, pane);
     // flower box under the window
     const pot = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.2, 0.25), this.M.wood());
     pot.position.set(8.8, 3.72, -11.7);
@@ -263,7 +264,11 @@ export class World {
     this.box(-15.3, 0, -4, -15, 3, -0.6, b);
     this.box(-15.3, 0, 0.6, -15, 3, 4, b);
     this.box(-15.3, 2.2, -0.6, -15, 3, 0.6, b);
-    for (const y of [4.8, 8.2]) this.windowRow(-18, 10, -14.98, y, 1, 0.5, "x");
+    buildFacade(this.scene, this.physics, {
+      axis: "x", plane: -15, dir: 1, from: -20, to: 12, top: 12, bottom: 3.05, seed: 7, lit: 0.5, ac: 0.1,
+      centers: centersThrough(-20, 12, 2.4, 0), rows: [{ sill: 4.1, height: 1.7 }, { sill: 7.3, height: 1.7 }, { sill: 10.2, height: 1.1 }],
+      wall: this.M.brickYellow(), frameColor: 0x2f4a3a,
+    });
     // shop windows (big display)
     for (const zc of [-2.4, 2.4]) {
       const w = new THREE.Mesh(new THREE.PlaneGeometry(2.4, 1.6), this.M.glassLit());
@@ -278,7 +283,7 @@ export class World {
     aw.castShadow = true;
     this.scene.add(aw);
     const neon = new THREE.Mesh(new THREE.PlaneGeometry(3.2, 0.8), new THREE.MeshBasicMaterial({ map: T.sign("РЫБА • FISH", "#0b0b12", "#5ff3ff"), toneMapped: false }));
-    neon.position.set(-14.93, 3.5, 0);
+    neon.position.set(-14.76, 3.55, 0);
     neon.rotation.y = Math.PI / 2;
     this.scene.add(neon);
     this.animated.push((t) => {
@@ -287,7 +292,11 @@ export class World {
       (neon.material as THREE.MeshBasicMaterial).color.setScalar(f);
     });
     // interior
-    this.box(-21, -0.05, -4, -15.3, 0.0, 4, this.M.tiles(), false, {}, 1);
+    this.box(-21, -0.05, -4, -15.3, 0.005, 4, mat("planks", () => new THREE.MeshStandardMaterial({ map: T.planks(), roughness: 0.55, envMapIntensity: 0.6 })), false, {}, 2.5);
+    // wainscot + tin-ceiling trim to read as an old Brooklyn corner shop
+    const wains = mat("wainscot", () => new THREE.MeshStandardMaterial({ color: 0x3c5a48, roughness: 0.6 }));
+    this.box(-20.99, 0, -3.99, -20.9, 1.0, 3.99, wains, false);
+    this.box(-20.99, 2.85, -3.99, -15.31, 3.0, 3.99, mat("tin", () => new THREE.MeshStandardMaterial({ color: 0xd9d2c0, roughness: 0.35, metalness: 0.4 })), false);
     const counter = this.box(-20.4, 0, -1.6, -19.0, 1.0, 1.6, this.M.wood());
     counter.mesh!.castShadow = true;
     for (const z of [-3.6, 3.2]) {
@@ -318,8 +327,11 @@ export class World {
   private buildEastBuilding() {
     const b = this.M.brickBrown();
     this.box(21, 0, -20, 31, 12.5, 6, b);
-    this.box(20.8, 12.1, -20.2, 31.2, 12.5, 6.2, this.M.trim(), false);
-    for (const y of [1.8, 5, 8.2, 11]) this.windowRow(-18, 4, 20.98, y, -1, 0.55, "x");
+    buildFacade(this.scene, this.physics, {
+      axis: "x", plane: 21, dir: -1, from: -20, to: 6, top: 12.5, seed: 11, lit: 0.55, ac: 0.2,
+      centers: centersThrough(-20, 6, 2.5, -7), rows: [{ sill: 0.9, height: 1.7 }, { sill: 4.1, height: 1.7 }, { sill: 7.3, height: 1.7 }, { sill: 10.4, height: 1.2 }],
+      wall: this.M.brickBrown(), frameColor: 0x1d2a3a,
+    });
     // alley fence between yard and alley with a hole cats can use
     const fence = mat("chain", () => new THREE.MeshStandardMaterial({ color: 0x8a9096, metalness: 0.8, roughness: 0.4, transparent: true, opacity: 0.55 }));
     this.box(15, 0, -12, 15.08, 2.4, 3, fence);
@@ -455,29 +467,55 @@ export class World {
     return t;
   }
 
-  private parkedCar(x: number, z: number, color: number, rotY = 0) {
+  /** Sedan built from rounded shells: body, glasshouse with pillars, chrome, lamps, wheels with rims. */
+  carModel(color: number, taxi = false) {
     const g = new THREE.Group();
-    const paint = new THREE.MeshPhysicalMaterial({ color, metalness: 0.6, roughness: 0.3, clearcoat: 1, clearcoatRoughness: 0.05 });
-    const body = new THREE.Mesh(new THREE.BoxGeometry(4.2, 0.7, 1.8), paint);
-    body.position.y = 0.72;
-    const cabin = new THREE.Mesh(new THREE.BoxGeometry(2.2, 0.6, 1.6), this.M.glassDark());
-    cabin.position.set(-0.2, 1.35, 0);
-    const roof = new THREE.Mesh(new THREE.BoxGeometry(2.0, 0.06, 1.62), paint);
-    roof.position.set(-0.2, 1.66, 0);
-    g.add(body, cabin, roof);
-    const wheelMat = mat("wheel", () => new THREE.MeshStandardMaterial({ color: 0x111111, roughness: 0.9 }));
-    for (const [wx, wz] of [[-1.35, 0.8], [1.35, 0.8], [-1.35, -0.8], [1.35, -0.8]]) {
-      const w = new THREE.Mesh(new THREE.CylinderGeometry(0.35, 0.35, 0.25, 16), wheelMat);
-      w.rotation.x = Math.PI / 2;
-      w.position.set(wx, 0.35, wz);
-      g.add(w);
+    const paint = new THREE.MeshPhysicalMaterial({ color, metalness: 0.55, roughness: 0.28, clearcoat: 1, clearcoatRoughness: 0.04 });
+    const glass = mat("carglass", () => new THREE.MeshPhysicalMaterial({ color: 0x0b0f14, roughness: 0.04, metalness: 0.2, clearcoat: 1, envMapIntensity: 1.8 }));
+    const chrome = mat("chrome", () => new THREE.MeshStandardMaterial({ color: 0xdfe3e6, metalness: 1, roughness: 0.18 }));
+    const rubber = mat("tyre", () => new THREE.MeshStandardMaterial({ color: 0x151515, roughness: 0.9 }));
+    const trim = mat("cartrim", () => new THREE.MeshStandardMaterial({ color: 0x111214, roughness: 0.6 }));
+    const add = (geo: THREE.BufferGeometry, m: THREE.Material, x: number, y: number, z: number) => {
+      const o = new THREE.Mesh(geo, m);
+      o.position.set(x, y, z);
+      g.add(o);
+      return o;
+    };
+    add(new RoundedBoxGeometry(4.3, 0.62, 1.82, 4, 0.22), paint, 0, 0.66, 0);
+    add(new RoundedBoxGeometry(4.34, 0.16, 1.84, 2, 0.06), trim, 0, 0.42, 0); // rocker/bumper band
+    add(new RoundedBoxGeometry(2.25, 0.62, 1.62, 4, 0.2), glass, -0.25, 1.22, 0);
+    add(new RoundedBoxGeometry(2.0, 0.08, 1.58, 2, 0.04), paint, -0.25, 1.55, 0); // roof skin
+    for (const px of [-1.3, -0.25, 0.8]) add(new THREE.BoxGeometry(0.08, 0.55, 1.64), paint, px, 1.2, 0); // pillars
+    for (const s of [-1, 1]) {
+      add(new RoundedBoxGeometry(0.1, 0.12, 1.7, 2, 0.04), chrome, s * 2.17, 0.5, 0); // bumpers
+      const lamp = mat(s > 0 ? "headlamp" : "taillamp", () => new THREE.MeshStandardMaterial({ color: s > 0 ? 0xffffff : 0x550000, emissive: s > 0 ? 0xfff0c8 : 0xff2a1a, emissiveIntensity: s > 0 ? 2.2 : 1.4 }));
+      for (const z of [-0.62, 0.62]) add(new RoundedBoxGeometry(0.06, 0.14, 0.34, 2, 0.03), lamp, s * 2.16, 0.78, z);
+      add(new THREE.BoxGeometry(0.12, 0.08, 0.14), paint, 0.55, 1.02, s * 0.93); // mirrors
     }
-    const hl = mat("headlight", () => new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0xfff2c0, emissiveIntensity: 2 }));
-    for (const s of [-0.6, 0.6]) {
-      const l = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.15, 0.3), hl);
-      l.position.set(2.1, 0.8, s);
-      g.add(l);
+    add(new THREE.BoxGeometry(0.04, 0.16, 0.9), chrome, 2.16, 0.66, 0); // grille
+    for (const [wx, wz] of [[-1.35, 0.82], [1.35, 0.82], [-1.35, -0.82], [1.35, -0.82]]) {
+      const tyre = add(new THREE.TorusGeometry(0.26, 0.1, 10, 24), rubber, wx, 0.36, wz);
+      const rim = add(new THREE.CylinderGeometry(0.2, 0.2, 0.2, 16), chrome, wx, 0.36, wz);
+      rim.rotation.x = Math.PI / 2;
+      tyre.rotation.y = 0;
+      add(new THREE.CylinderGeometry(0.4, 0.4, 0.3, 16, 1, true, 0, Math.PI), trim, wx, 0.4, wz).rotation.set(Math.PI / 2, 0, 0); // wheel arch
     }
+    if (taxi) {
+      add(new RoundedBoxGeometry(0.62, 0.22, 0.24, 2, 0.05), new THREE.MeshStandardMaterial({ color: 0xfff3b0, emissive: 0xffe066, emissiveIntensity: 0.8 }), -0.25, 1.7, 0);
+      add(new THREE.BoxGeometry(2.6, 0.08, 1.845), new THREE.MeshStandardMaterial({ color: 0x111111 }), 0, 0.72, 0); // checker stripe
+    }
+    g.traverse((o) => {
+      const ms = o as THREE.Mesh;
+      if (ms.isMesh) {
+        ms.castShadow = true;
+        ms.receiveShadow = true;
+      }
+    });
+    return g;
+  }
+
+  private parkedCar(x: number, z: number, color: number, rotY = 0) {
+    const g = this.carModel(color);
     g.position.set(x, 0, z);
     g.rotation.y = rotY;
     g.traverse((o) => ((o as THREE.Mesh).castShadow = true));
@@ -490,24 +528,49 @@ export class World {
   }
 
   private tree(x: number, z: number) {
-    const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.22, 3.2, 8), mat("bark", () => new THREE.MeshStandardMaterial({ color: 0x4a3526, roughness: 1 })));
+    const bark = mat("bark", () => new THREE.MeshStandardMaterial({ map: T.wood(41, "#4a3a2c"), roughness: 1 }));
+    const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.22, 3.2, 10), bark);
     trunk.position.set(x, 1.6, z);
     trunk.castShadow = true;
     this.scene.add(trunk);
-    const leaves = mat("leaves", () => new THREE.MeshStandardMaterial({ color: 0x4f7f35, roughness: 0.9, flatShading: true }));
+    // leafy crown: many lumpy, smooth-shaded clusters with per-vertex colour variation
+    const leaves = mat("leaves2", () => new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.85 }));
     const crown = new THREE.Group();
-    for (let i = 0; i < 6; i++) {
-      const b = new THREE.Mesh(new THREE.IcosahedronGeometry(0.9 + (i % 3) * 0.25, 1), leaves);
-      b.position.set(Math.cos(i) * 0.8, 3.4 + (i % 2) * 0.6, Math.sin(i * 1.3) * 0.8);
+    let seed = Math.floor(Math.abs(x * 31 + z * 17)) + 1;
+    const r = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+    for (let i = 0; i < 14; i++) {
+      const g = mergeVertices(new THREE.IcosahedronGeometry(0.55 + r() * 0.45, 3));
+      const pos = g.attributes.position as THREE.BufferAttribute;
+      const cols = new Float32Array(pos.count * 3);
+      const v = new THREE.Vector3();
+      for (let k = 0; k < pos.count; k++) {
+        v.fromBufferAttribute(pos, k);
+        const n = Math.sin(v.x * 9 + i) * Math.sin(v.y * 11) * Math.sin(v.z * 7 + i * 2);
+        v.multiplyScalar(1 + n * 0.18);
+        pos.setXYZ(k, v.x, v.y, v.z);
+        const c = new THREE.Color().setHSL(0.22 + r() * 0.06, 0.45, 0.18 + (v.y > 0 ? 0.1 : 0) + r() * 0.06);
+        cols.set([c.r, c.g, c.b], k * 3);
+      }
+      g.setAttribute("color", new THREE.BufferAttribute(cols, 3));
+      g.computeVertexNormals();
+      const b = new THREE.Mesh(g, leaves);
+      const a = r() * Math.PI * 2, rad = r() * 1.1;
+      b.position.set(Math.cos(a) * rad, 3.1 + r() * 1.3, Math.sin(a) * rad);
       b.castShadow = true;
+      b.receiveShadow = true;
       crown.add(b);
     }
     crown.position.set(x, 0, z);
     this.scene.add(crown);
-    this.animated.push((t) => (crown.rotation.z = Math.sin(t * 0.8 + x) * 0.015));
+    this.animated.push((t) => (crown.rotation.z = Math.sin(t * 0.8 + x) * 0.012));
     this.box(x - 0.2, 0, z - 0.2, x + 0.2, 3.2, z + 0.2, null);
     // a branch you can sit on
-    this.box(x - 0.1, 2.2, z - 0.1, x + 1.3, 2.35, z + 0.1, leaves, true);
+    const branch = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.09, 1.4, 8), bark);
+    branch.rotation.z = Math.PI / 2;
+    branch.position.set(x + 0.6, 2.28, z);
+    branch.castShadow = true;
+    this.scene.add(branch);
+    this.box(x - 0.1, 2.2, z - 0.1, x + 1.3, 2.35, z + 0.1, null);
   }
 
   private streetLamp(x: number, z: number) {
@@ -650,7 +713,10 @@ export class World {
       const drum = new THREE.Mesh(new THREE.CircleGeometry(0.25, 20), mat("drum", () => new THREE.MeshStandardMaterial({ color: 0x223344, roughness: 0.1, metalness: 0.6 })));
       drum.position.set(x + 0.4, -2.55, -19.19);
       this.scene.add(drum);
-      if (i === 1) this.animated.push((t) => wm.mesh && (wm.mesh.position.x = x + 0.4 + Math.sin(t * 40) * 0.006));
+      if (i === 1 && wm.mesh) {
+        wm.mesh.userData.batch = false; // it shakes during the spin cycle
+        this.animated.push((t) => wm.mesh && (wm.mesh.position.x = x + 0.4 + Math.sin(t * 40) * 0.006));
+      }
     }
     this.box(4.5, -3, -19.8, 6.8, -1.0, -18.4, this.M.metal()); // boiler
     const boilerGlow = new THREE.PointLight(0xff6a2a, 3, 5, 2);
@@ -667,11 +733,11 @@ export class World {
       const bulb = new THREE.Mesh(new THREE.SphereGeometry(0.08, 10, 8), new THREE.MeshBasicMaterial({ color: 0xffe2a0 }));
       bulb.position.set(x, -0.7, z);
       this.scene.add(bulb);
-      const l = new THREE.PointLight(0xffd08a, 5, 9, 1.7);
+      const l = new THREE.PointLight(0xffd08a, 9, 11, 1.6);
       l.position.set(x, -0.8, z);
       this.scene.add(l);
       this.lights.push(l);
-      this.animated.push((t) => (l.intensity = 5 + (Math.sin(t * 17 + x) > 0.98 ? -3 : 0)));
+      this.animated.push((t) => (l.intensity = 9 + (Math.sin(t * 17 + x) > 0.98 ? -5 : 0)));
     }
     // room B: checkpoint, stash, freight elevator in shaft x -11..-9, z -19..-17
     this.checkpoint("basement", "Подвал", -5, -3, -14);
@@ -910,20 +976,7 @@ export class World {
     this.parkedCar(20, 21.9, 0x1e6f5c);
     for (let i = 0; i < 4; i++) {
       const lane = i % 2;
-      const g = new THREE.Group();
-      const col = [0xf1c40f, 0xe74c3c, 0x3498db, 0xecf0f1][i];
-      const paint = new THREE.MeshPhysicalMaterial({ color: col, metalness: 0.5, roughness: 0.35, clearcoat: 1 });
-      const b = new THREE.Mesh(new THREE.BoxGeometry(4.2, 0.8, 1.8), paint);
-      b.position.y = 0.75;
-      const c = new THREE.Mesh(new THREE.BoxGeometry(2.2, 0.6, 1.6), this.M.glassDark());
-      c.position.y = 1.4;
-      g.add(b, c);
-      if (i === 0) {
-        const sign = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.25, 0.2), new THREE.MeshBasicMaterial({ color: 0xfff6a0 }));
-        sign.position.y = 1.85;
-        g.add(sign); // NYC taxi
-      }
-      g.traverse((o) => ((o as THREE.Mesh).castShadow = true));
+      const g = this.carModel([0xf2b705, 0x8e1b1b, 0x1d4e89, 0xd9dcdf][i], i === 0);
       g.position.set(-50 + i * 27, 0, lane ? 20.8 : 16.8);
       this.scene.add(g);
       const col2 = this.physics.add(new THREE.Box3(), { tag: "car" });
@@ -931,11 +984,74 @@ export class World {
     }
   }
 
+  private buildBrownstones() {
+    const stoneM = mat("brownstone", () => new THREE.MeshStandardMaterial({ map: T.stone(21, "#7b5442"), roughness: 0.92 }));
+    const iron = this.M.ironBlack();
+    const stepM = mat("stoop", () => new THREE.MeshStandardMaterial({ map: T.stone(22, "#6d4a3a"), roughness: 0.9 }));
+    const doorM = mat("door", () => new THREE.MeshStandardMaterial({ map: T.wood(31, "#3b2416"), roughness: 0.5 }));
+    const zf = 25.8;
+    let seed = 5;
+    const r = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+    for (let i = 0; i < 11; i++) {
+      const x0 = -44 + i * 8, x1 = x0 + 8;
+      const h = 11 + Math.floor(r() * 3) * 0.9;
+      this.box(x0, 0, zf, x1, h, 34, stoneM, true, {}, 2);
+      buildFacade(this.scene, this.physics, {
+        axis: "z", plane: zf, dir: -1, from: x0, to: x1, top: h, seed: 20 + i, lit: 0.55, ac: 0.05,
+        centers: [x0 + 1.7, x0 + 4.1, x0 + 6.3], width: 1.15,
+        rows: [{ sill: 0.45, height: 0.95 }, { sill: 2.2, height: 2.0 }, { sill: 5.5, height: 1.8 }, { sill: 8.4, height: 1.6 }].filter((row) => row.sill + row.height < h - 0.9),
+        wall: stoneM, frameColor: i % 3 === 0 ? 0x1f3326 : i % 3 === 1 ? 0x2a2320 : 0xe6dfd0, custom: new Set(["0:1"]),
+      });
+      // parlour door with transom + a stoop down to the sidewalk (walkable)
+      const door = new THREE.Mesh(new THREE.PlaneGeometry(1.0, 1.75), doorM);
+      door.position.set(x0 + 1.7, 2.2 + 0.88, zf - 0.04);
+      door.rotation.y = Math.PI;
+      const transom = new THREE.Mesh(new THREE.PlaneGeometry(1.0, 0.22), this.M.glassLit());
+      transom.position.set(x0 + 1.7, 4.07, zf - 0.04);
+      transom.rotation.y = Math.PI;
+      this.scene.add(door, transom);
+      const steps = 10;
+      for (let k = 0; k < steps; k++) {
+        const y1 = 0.12 + ((k + 1) / steps) * 2.08;
+        const z0 = 23.6 + (k / steps) * 1.9;
+        this.box(x0 + 1.05, 0, z0, x0 + 2.35, y1, zf - 0.2, stepM);
+      }
+      for (const sx of [x0 + 1.02, x0 + 2.38]) {
+        const rail = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.025, 2.9, 6), iron);
+        rail.position.set(sx, 2.0, 24.6);
+        // handrail follows the stoop pitch (rise 2.08 over run 1.9)
+        rail.rotation.x = Math.atan2(1.9, 2.08);
+        rail.userData.batch = true;
+        this.scene.add(rail);
+        for (let k = 0; k < 6; k++) this.box(sx - 0.015, 0.1, 23.7 + k * 0.36, sx + 0.015, 0.1 + 0.9 + k * 0.38, 23.73 + k * 0.36, iron, false);
+      }
+      // areaway railing in front of the garden-level windows
+      this.box(x0 + 2.6, 0.12, 23.5, x1 - 0.2, 1.0, 23.54, iron, false);
+      for (let xx = x0 + 2.6; xx < x1 - 0.2; xx += 0.14) this.box(xx, 0.12, 23.5, xx + 0.02, 1.0, 23.53, iron, false);
+      if (i % 2 === 0) this.tree(x0 + 5, 23.6);
+    }
+  }
+
   private buildSkyline() {
     const litTex = T.windows(true, 3);
     const dayTex = T.windows(false, 3);
     const geo = new THREE.BoxGeometry(1, 1, 1);
-    const m = new THREE.MeshStandardMaterial({ map: dayTex, emissiveMap: litTex, emissive: 0xffffff, emissiveIntensity: 0.45, roughness: 0.9 });
+    const m = new THREE.MeshStandardMaterial({ map: dayTex, emissiveMap: litTex, emissive: 0xffffff, emissiveIntensity: 0.4, roughness: 0.9 });
+    // world-space UVs: one texture tile = 8x8 windows of 3 m x 3.2 m, whatever the tower's size
+    m.onBeforeCompile = (sh) => {
+      sh.vertexShader = sh.vertexShader
+        .replace("#include <common>", "#include <common>\nvarying vec3 vSkyPos; varying vec3 vSkyN;")
+        .replace("#include <worldpos_vertex>", "#include <worldpos_vertex>\n{ mat4 im = modelMatrix * instanceMatrix; vSkyPos = (im * vec4(transformed, 1.0)).xyz; vSkyN = normalize(mat3(im) * objectNormal); }");
+      sh.fragmentShader = sh.fragmentShader
+        .replace("#include <common>", "#include <common>\nvarying vec3 vSkyPos; varying vec3 vSkyN;")
+        .replace("#include <map_fragment>", `
+          vec2 wuv = (abs(vSkyN.x) > 0.5 ? vSkyPos.zy : vSkyPos.xy) / vec2(24.0, 25.6);
+          bool roof = abs(vSkyN.y) > 0.5;
+          vec4 texelColor = roof ? vec4(0.22, 0.2, 0.19, 1.0) : texture2D(map, wuv);
+          diffuseColor *= texelColor;`)
+        .replace("#include <emissivemap_fragment>", "if (!roof) totalEmissiveRadiance *= texture2D(emissiveMap, wuv).rgb; else totalEmissiveRadiance *= 0.0;");
+    };
+    m.customProgramCacheKey = () => "skyline";
     const count = 170;
     const inst = new THREE.InstancedMesh(geo, m, count);
     const d = new THREE.Object3D();
@@ -958,6 +1074,42 @@ export class World {
     }
     inst.count = k;
     this.scene.add(inst);
+    // setbacks and rooftop water towers break up the box silhouettes
+    const top = new THREE.InstancedMesh(geo, m, k);
+    const towers = new THREE.InstancedMesh(new THREE.CylinderGeometry(0.5, 0.5, 1, 10), mat("skytower", () => new THREE.MeshStandardMaterial({ color: 0x5a4632, roughness: 1 })), k);
+    const caps = new THREE.InstancedMesh(new THREE.ConeGeometry(0.58, 0.5, 10), mat("skycap", () => new THREE.MeshStandardMaterial({ color: 0x3a3a3a, roughness: 0.7 })), k);
+    const mtx = new THREE.Matrix4(), q = new THREE.Quaternion(), sc = new THREE.Vector3(), ps = new THREE.Vector3();
+    let nt = 0, nw = 0;
+    for (let i = 0; i < k; i++) {
+      inst.getMatrixAt(i, mtx);
+      mtx.decompose(ps, q, sc);
+      const roof = ps.y + sc.y / 2;
+      if (r() < 0.55) {
+        d.position.set(ps.x, roof + sc.y * 0.12, ps.z);
+        d.quaternion.copy(q);
+        d.scale.set(sc.x * 0.65, sc.y * 0.24, sc.z * 0.65);
+        d.updateMatrix();
+        top.setMatrixAt(nt, d.matrix);
+        top.setColorAt(nt, new THREE.Color().setHSL(0.06 + r() * 0.06, 0.2, 0.3 + r() * 0.25));
+        nt++;
+      } else if (r() < 0.7) {
+        const tx = ps.x + (r() - 0.5) * sc.x * 0.5, tz = ps.z + (r() - 0.5) * sc.z * 0.5;
+        d.quaternion.identity();
+        d.position.set(tx, roof + 3, tz);
+        d.scale.set(3.4, 2.6, 3.4);
+        d.updateMatrix();
+        towers.setMatrixAt(nw, d.matrix);
+        d.position.set(tx, roof + 4.55, tz);
+        d.scale.set(3.4, 1.8, 3.4);
+        d.updateMatrix();
+        caps.setMatrixAt(nw, d.matrix);
+        nw++;
+      }
+    }
+    top.count = nt;
+    towers.count = nw;
+    caps.count = nw;
+    this.scene.add(top, towers, caps);
     // Brooklyn bridge silhouette far away
     const bm = new THREE.MeshStandardMaterial({ color: 0x6b5a4a, roughness: 1 });
     for (const x of [-60, 60]) {

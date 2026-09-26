@@ -417,6 +417,15 @@ export class AudioEngine {
     [0, 4, 7, 12, 7, 12, 16].forEach((n, i) => this.tone(t + i * 0.11, mtof(67 + n), 0.3, "square", 0.08, this.sfxBus, 4000));
   }
 
+  /** Soul-swap cue when control moves to the other cat. */
+  swapChime() {
+    if (!this.ctx) return;
+    const t = this.now;
+    [0, 7, 12, 19].forEach((n, i) => this.tone(t + i * 0.06, mtof(76 + n), 0.5, "sine", 0.1, this.sfxBus, 6000));
+    const f = this.noise(t, 0.4, 0.12, this.sfxBus, "bandpass", 1200, 3);
+    f.frequency.exponentialRampToValueAtTime(6000, t + 0.4);
+  }
+
   boing() {
     if (!this.ctx) return;
     const ctx = this.ctx, t = this.now;

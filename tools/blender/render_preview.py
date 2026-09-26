@@ -16,14 +16,16 @@ bpy.ops.wm.read_factory_settings(use_empty=True)
 bpy.ops.import_scene.gltf(filepath=src)
 sc = bpy.context.scene
 arm = next((o for o in sc.objects if o.type == "ARMATURE"), None)
-if arm and action and action in bpy.data.actions:
-    arm.animation_data.action = bpy.data.actions[action]
+if arm and action:
+    act = next((a for a in bpy.data.actions if a.name == action or a.name.startswith(action + "_")), None)
+    if act:
+        arm.animation_data.action = act
 sc.frame_set(frame)
 
 sc.render.engine = "CYCLES"
-sc.cycles.samples = 24
+sc.cycles.samples = 16
 sc.cycles.use_denoising = False
-sc.render.resolution_x, sc.render.resolution_y = 640, 480
+sc.render.resolution_x, sc.render.resolution_y = 480, 360
 world = bpy.data.worlds.new("w")
 world.use_nodes = True
 world.node_tree.nodes["Background"].inputs[0].default_value = (0.55, 0.6, 0.7, 1)

@@ -108,7 +108,37 @@ html, body { margin: 0; height: 100%; overflow: hidden; background: #14161f; fon
   .player-panel:not(.split) { padding-left: 84px; }
 }
 
-/* split screen: keep shared HUD inside player 1's half */
-.split .hud-top { left: 25%; }
-.split .objective { max-width: 45vw; font-size: 13px; }
-.split .fish-count { right: auto; left: calc(50% - 110px); top: auto; bottom: 14px; }
+
+/* ---------- HUD layout v2: every text element sits on its own readable plate ---------- */
+:root { --plate: rgba(12, 14, 22, 0.72); --plate-border: 1px solid rgba(255, 255, 255, 0.14); }
+#ui { text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9); }
+.hud-top { top: 12px; gap: 4px; }
+.objective { background: var(--plate); border: var(--plate-border); border-radius: 999px; padding: 7px 18px; font-size: 14px; letter-spacing: 0.2px; backdrop-filter: blur(6px); max-width: min(720px, 60vw); }
+.nav-arrow { width: 36px; height: 36px; opacity: 0.6; }
+.fish-count { top: 12px; right: 14px; font-size: 20px; padding: 6px 14px; background: var(--plate); border: var(--plate-border); border-radius: 999px; backdrop-filter: blur(6px); }
+.toast { top: 96px; background: var(--plate); border: var(--plate-border); font-size: 15px; padding: 9px 16px; backdrop-filter: blur(6px); }
+.track-toast { bottom: 14px; right: 14px; background: var(--plate); border: var(--plate-border); font-size: 12px; }
+.subtitle { bottom: 11vh; font-size: 20px; line-height: 1.35; background: rgba(8, 9, 14, 0.66); padding: 10px 18px; border-radius: 12px; max-width: min(900px, 80vw); }
+.cinematic .subtitle { bottom: 11.5vh; }
+.player-panel { left: 14px !important; top: auto !important; bottom: 14px; width: auto !important; height: auto !important; padding: 10px 14px !important; background: var(--plate); border: var(--plate-border) !important; border-radius: 14px; backdrop-filter: blur(6px); min-width: 170px; }
+.pp-name { font-size: 15px; }
+.pp-hearts { font-size: 17px; }
+.pp-ability { font-size: 11px; color: #cfd6e2; margin-top: 2px; }
+.pp-prompt { position: fixed; bottom: 21vh; left: 50%; transform: translateX(-50%); background: var(--plate); border: 1px solid rgba(255, 210, 120, 0.45); font-size: 15px; padding: 8px 16px; backdrop-filter: blur(6px); }
+.portraits { left: 14px; top: 42%; }
+.portrait { width: 74px; height: 74px; }
+.portrait span { bottom: -10px; font-size: 11px; background: var(--plate); border: var(--plate-border); }
+.portrait em { background: #7de3ff; }
+.boss-bar { bottom: 4.5vh; background: var(--plate); border: var(--plate-border); border-radius: 12px; padding: 6px 12px 8px; }
+.room-badge { position: absolute; top: 12px; left: 14px; display: flex; gap: 10px; align-items: center; background: var(--plate); border: var(--plate-border); border-radius: 999px; padding: 5px 6px 5px 14px; font-size: 13px; z-index: 6; pointer-events: auto; }
+.room-badge button { font: inherit; font-size: 12px; border: none; border-radius: 999px; padding: 5px 10px; background: linear-gradient(180deg, #ffb347, #ff7b25); color: #1a1000; font-weight: bold; cursor: pointer; }
+.menu-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 6px; text-align: left; }
+.menu-cols section { background: rgba(255, 255, 255, 0.05); border: var(--plate-border); border-radius: 16px; padding: 12px 16px; }
+.menu-cols h3 { margin: 0 0 4px; }
+.menu-cols .hint { margin: 0 0 6px; color: #aab; font-size: 13px; }
+.menu-cols .menu-buttons { justify-content: flex-start; margin-top: 8px; }
+.join { display: flex; gap: 8px; margin-top: 10px; }
+.join input { font: inherit; font-size: 18px; letter-spacing: 4px; width: 120px; text-align: center; text-transform: uppercase; border-radius: 12px; border: 1px solid rgba(255, 255, 255, 0.25); background: rgba(0, 0, 0, 0.35); color: #fff; padding: 8px; }
+.join input.err { border-color: #ff6b6b; }
+@media (max-width: 760px) { .menu-cols { grid-template-columns: 1fr; } }
+.title h1 { text-shadow: none; }

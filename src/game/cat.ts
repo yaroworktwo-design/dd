@@ -1,7 +1,7 @@
 import * as THREE from "three";
 import { GLTFLoader, type GLTF } from "three/examples/jsm/loaders/GLTFLoader.js";
 import * as SkeletonUtils from "three/examples/jsm/utils/SkeletonUtils.js";
-import { addFur } from "./fur";
+import { addFur, furWind, setFurShells } from "./fur";
 import { moveBody, type Body, type MoveEvents, type PhysicsWorld } from "../engine/physics";
 import type { PlayerInput } from "../engine/input";
 import { audio } from "../engine/audio";
@@ -9,34 +9,46 @@ import { fabric } from "../engine/textures";
 
 export type CatId = "dymok" | "milena" | "pixel" | "karniz" | "plombir";
 
+export interface FurDef {
+  length: number;
+  density: number;
+  comb: number;
+  tip: number;
+  rim: number;
+}
+
 export interface CatDef {
   id: CatId;
   name: string;
-  walk: number;
+  walk: number; // slowest analog speed
+  trot: number; // default movement
   run: number;
+  sneak: number;
   jump: number;
   half: number;
   height: number;
   strength: number;
   ability: "dash" | "hiss" | "doublejump" | "none";
-  fur: number;
-  density: number;
+  fur: FurDef;
   pitch: number;
   color: string;
 }
 
 export const CATS: Record<CatId, CatDef> = {
-  dymok: { id: "dymok", name: "Дымок", walk: 1.3, run: 4.3, jump: 5.3, half: 0.16, height: 0.36, strength: 2, ability: "dash", fur: 0.014, density: 360, pitch: 0.72, color: "#5b5d66" },
-  milena: { id: "milena", name: "Милена", walk: 1.5, run: 5.1, jump: 6.1, half: 0.1, height: 0.32, strength: 0, ability: "hiss", fur: 0.011, density: 420, pitch: 1.25, color: "#c9ccd3" },
-  pixel: { id: "pixel", name: "Пиксель", walk: 1.5, run: 5.2, jump: 5.8, half: 0.11, height: 0.32, strength: 1, ability: "doublejump", fur: 0.008, density: 440, pitch: 1.05, color: "#222" },
-  karniz: { id: "karniz", name: "Карниз", walk: 1.4, run: 5.5, jump: 6, half: 0.18, height: 0.4, strength: 2, ability: "none", fur: 0.013, density: 360, pitch: 0.6, color: "#d66a1c" },
-  plombir: { id: "plombir", name: "Пломбир", walk: 1, run: 2, jump: 3, half: 0.16, height: 0.36, strength: 0, ability: "none", fur: 0.02, density: 380, pitch: 0.9, color: "#f3f1ea" },
+  dymok: { id: "dymok", name: "Дымок", walk: 0.35, trot: 1.05, run: 3.0, sneak: 0.32, jump: 5.3, half: 0.16, height: 0.36, strength: 2, ability: "dash", fur: { length: 0.009, density: 950, comb: 1.1, tip: 0.55, rim: 0.5 }, pitch: 0.72, color: "#5b5d66" },
+  milena: { id: "milena", name: "Милена", walk: 0.35, trot: 1.15, run: 3.6, sneak: 0.36, jump: 6.1, half: 0.1, height: 0.32, strength: 0, ability: "hiss", fur: { length: 0.007, density: 1050, comb: 1.1, tip: 0.2, rim: 0.3 }, pitch: 1.25, color: "#c9ccd3" },
+  pixel: { id: "pixel", name: "Пиксель", walk: 0.35, trot: 1.15, run: 3.6, sneak: 0.36, jump: 5.8, half: 0.11, height: 0.32, strength: 1, ability: "doublejump", fur: { length: 0.005, density: 1150, comb: 1.0, tip: 0.1, rim: 0.7 }, pitch: 1.05, color: "#222" },
+  karniz: { id: "karniz", name: "Карниз", walk: 0.35, trot: 1.2, run: 4.0, sneak: 0.4, jump: 6, half: 0.18, height: 0.4, strength: 2, ability: "none", fur: { length: 0.008, density: 950, comb: 1.1, tip: 0.25, rim: 0.3 }, pitch: 0.6, color: "#d66a1c" },
+  plombir: { id: "plombir", name: "Пломбир", walk: 0.3, trot: 0.6, run: 1.5, sneak: 0.3, jump: 3, half: 0.16, height: 0.36, strength: 0, ability: "none", fur: { length: 0.016, density: 800, comb: 1.5, tip: 0.15, rim: 0.2 }, pitch: 0.9, color: "#f3f1ea" },
 };
+
+/** Ground speed of each baked clip at timeScale 1 (stride / (duty * cycle)), see make_cats.py. */
+const CLIP_SPEED: Record<string, number> = { Walk: 0.242, Trot: 0.667, Run: 2.03, Sneak: 0.185 };
 
 const loader = new GLTFLoader();
 const gltfCache = new Map<string, Promise<GLTF>>();
-export const furWind = { value: 0 };
-export const quality = { shells: 12 };
+export { furWind };
+export const quality = { shells: 16 };
 
 export function preloadCat(id: CatId) {
   if (!gltfCache.has(id)) gltfCache.set(id, loader.loadAsync(`${import.meta.env.BASE_URL}models/${id}.glb`));
@@ -114,20 +126,35 @@ export class Cat {
   async load() {
     const gltf = await preloadCat(this.def.id);
     this.model = SkeletonUtils.clone(gltf.scene);
+    const masks: { p: THREE.Vector3; r: number }[] = [];
     this.model.traverse((o) => {
       const m = o as THREE.Mesh;
       if (!m.isMesh) return;
       m.castShadow = true;
       const mat = m.material as THREE.MeshStandardMaterial;
+      if (mat.name === "eye_iris" || mat.name === "nose") {
+        // bind-space centres of each eyeball / the nose, used to keep fur off them
+        const pos = m.geometry.attributes.position as THREE.BufferAttribute;
+        for (const side of mat.name === "nose" ? [0] : [-1, 1]) {
+          const box = new THREE.Box3();
+          const v = new THREE.Vector3();
+          for (let i = 0; i < pos.count; i++) {
+            v.fromBufferAttribute(pos, i);
+            if (side === 0 || Math.sign(v.x) === side) box.expandByPoint(v);
+          }
+          const size = box.getSize(new THREE.Vector3());
+          masks.push({ p: box.getCenter(new THREE.Vector3()), r: Math.max(size.x, size.y, size.z) * 0.5 });
+        }
+      }
       if (mat.name === "eye_iris") {
-        m.material = new THREE.MeshPhysicalMaterial({ color: mat.color, roughness: 0.25, clearcoat: 1, clearcoatRoughness: 0.03, emissive: mat.color, emissiveIntensity: 0.18 });
-      } else if (mat.name === "eye_pupil") {
-        m.material = new THREE.MeshPhysicalMaterial({ color: 0x050505, roughness: 0.1, clearcoat: 1 });
+        // wet cornea: clear-coat highlight over the painted iris, faint tapetum glow
+        m.material = new THREE.MeshPhysicalMaterial({ map: mat.map, roughness: 0.35, clearcoat: 1, clearcoatRoughness: 0.02, emissiveMap: mat.map, emissive: 0xffffff, emissiveIntensity: 0.12, envMapIntensity: 1.4 });
+        m.castShadow = false;
       } else if (mat.name === "whisker") {
         m.castShadow = false;
       }
     });
-    addFur(this.model, { shells: quality.shells, length: this.def.fur, density: this.def.density, tipLighten: this.def.id === "dymok" ? 0.9 : 0.4 }, furWind);
+    addFur(this.model, { shells: quality.shells, length: this.def.fur.length, density: this.def.fur.density, comb: this.def.fur.comb, tipLighten: this.def.fur.tip, rim: this.def.fur.rim, masks });
     this.root.add(this.model);
     this.mixer = new THREE.AnimationMixer(this.model);
     for (const clip of gltf.animations) {
@@ -165,8 +192,16 @@ export class Cat {
     return new THREE.Vector3(Math.sin(this.yaw), 0, Math.cos(this.yaw));
   }
 
+  /** Host side: damage to a cat owned by another player is forwarded to them. */
+  damageProxy?: (n: number, from?: THREE.Vector3) => void;
+
   damage(n: number, from?: THREE.Vector3) {
     if (this.invuln > 0 || this.state === "scripted") return false;
+    if (this.damageProxy) {
+      this.invuln = 1.1;
+      this.damageProxy(n, from);
+      return true;
+    }
     this.health = Math.max(0, this.health - n);
     this.invuln = 1.1;
     audio.hit();
@@ -225,7 +260,8 @@ export class Cat {
     const right = new THREE.Vector3(Math.cos(camYaw), 0, -Math.sin(camYaw));
     const wish = fwd.multiplyScalar(my).add(right.multiplyScalar(mx));
     const wishLen = Math.min(1, wish.length());
-    let speed = this.sneaking ? this.def.walk * 0.6 : run ? this.def.run : this.def.walk * 1.4;
+    // gentle stick = walk, full stick = trot, run button = gallop
+    let speed = this.sneaking ? this.def.sneak : run ? this.def.run : THREE.MathUtils.lerp(this.def.walk, this.def.trot, THREE.MathUtils.smoothstep(wishLen, 0.35, 0.8));
     if (this.actionLock > 0 && b.grounded) speed *= 0.3;
 
     if (this.state === "swing" && this.anchor) {
@@ -329,14 +365,30 @@ export class Cat {
     const b = this.body;
     if (this.current === "Hiss" && this.actionLock > 0) return;
     if (!b.grounded) {
-      if (this.current !== "Jump") this.play("Jump", 0.15, 0.8);
+      if (this.current !== "Jump") this.play("Jump", 0.12, 1);
       return;
     }
-    const v = this.moving;
-    if (v < 0.15) this.play(this.sneaking ? "Sneak" : "Idle", 0.25, this.sneaking ? 0 : 1);
-    else if (this.sneaking) this.play("Sneak", 0.2, v / 0.9);
-    else if (v < 2.6) this.play("Walk", 0.2, v / 1.4);
-    else this.play("Run", 0.2, v / 4.5);
+    this.play(Cat.gaitFor(this.moving, this.sneaking), 0.22);
+    this.syncGait();
+  }
+
+  static gaitFor(v: number, sneaking: boolean) {
+    if (v < 0.08) return sneaking ? "Sneak" : "Idle";
+    if (sneaking) return "Sneak";
+    if (v < 0.6) return "Walk";
+    if (v < 2.1) return "Trot";
+    return "Run";
+  }
+
+  /** Match cadence to ground speed so planted paws don't skate. */
+  syncGait() {
+    const clip = CLIP_SPEED[this.current];
+    const a = this.actions[this.current];
+    if (clip && a) a.timeScale = this.moving < 0.05 ? 0 : THREE.MathUtils.clamp(this.moving / clip, 0.3, 2.4);
+  }
+
+  setFurQuality(shells: number) {
+    setFurShells(this.model, shells);
   }
 
   private useAbility() {
@@ -469,5 +521,43 @@ export class Cat {
     this.model.scale.copy(savedScale);
     this.current = "";
     this.play("Idle", 0);
+  }
+
+  // ------------------------------------------------------------ network puppets
+  private remote: { t: number; p: THREE.Vector3; yaw: number; v: number }[] = [];
+
+  pushRemote(p: [number, number, number], yaw: number, anim: string, v: number, sneak: boolean) {
+    this.remote.push({ t: performance.now(), p: new THREE.Vector3(...p), yaw, v });
+    if (this.remote.length > 20) this.remote.shift();
+    this.sneaking = sneak;
+    if (anim && anim !== this.current && this.actions[anim]) {
+      if (["Jump", "Attack", "Hiss"].includes(anim)) this.actions[anim].reset();
+      this.play(anim, 0.15);
+    }
+  }
+
+  /** Interpolated playback ~100 ms behind the latest packet. */
+  updateRemote(dt: number) {
+    const buf = this.remote;
+    if (buf.length) {
+      const t = performance.now() - 100;
+      let a = buf[0], b = buf[buf.length - 1];
+      for (let i = 0; i < buf.length - 1; i++) {
+        if (buf[i].t <= t && buf[i + 1].t >= t) {
+          a = buf[i];
+          b = buf[i + 1];
+          break;
+        }
+      }
+      const k = b.t > a.t ? THREE.MathUtils.clamp((t - a.t) / (b.t - a.t), 0, 1) : 1;
+      this.root.position.lerpVectors(a.p, b.p, k);
+      let d = b.yaw - a.yaw;
+      d = Math.atan2(Math.sin(d), Math.cos(d));
+      this.yaw = a.yaw + d * k;
+      this.moving = a.v + (b.v - a.v) * k;
+    }
+    this.root.rotation.y = this.yaw;
+    this.syncGait();
+    this.mixer.update(dt);
   }
 }

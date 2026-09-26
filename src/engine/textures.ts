@@ -261,3 +261,84 @@ export function windowPane(lit: boolean) {
     g.fillRect(0, s * 0.45, s, 6);
   });
 }
+
+/** Worn oak floorboards for interiors. */
+export function planks() {
+  return make("planks", 512, (g, s) => {
+    let seed = 77;
+    const r = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+    const rows = 8;
+    for (let row = 0; row < rows; row++) {
+      let x = -r() * s * 0.5;
+      while (x < s) {
+        const len = s * (0.35 + r() * 0.5);
+        const c = new THREE.Color("#7a5534").offsetHSL((r() - 0.5) * 0.02, (r() - 0.5) * 0.1, (r() - 0.5) * 0.1);
+        g.fillStyle = `#${c.getHexString()}`;
+        g.fillRect(x, (row * s) / rows, len, s / rows);
+        for (let k = 0; k < 14; k++) {
+          g.strokeStyle = `rgba(40,22,10,${0.08 + r() * 0.12})`;
+          g.lineWidth = 1;
+          const y = (row * s) / rows + r() * (s / rows);
+          g.beginPath();
+          g.moveTo(x, y);
+          g.bezierCurveTo(x + len * 0.3, y + (r() - 0.5) * 6, x + len * 0.7, y + (r() - 0.5) * 6, x + len, y);
+          g.stroke();
+        }
+        g.fillStyle = "rgba(20,10,4,0.7)";
+        g.fillRect(x, (row * s) / rows, 2, s / rows);
+        x += len;
+      }
+      g.fillStyle = "rgba(20,10,4,0.75)";
+      g.fillRect(0, (row * s) / rows, s, 2);
+    }
+    // scuffs and wax sheen variation
+    speckle(g, s, 6000, 0.12, 5, false);
+  });
+}
+
+export function stone(seed = 12, tone = "#cfc6b4") {
+  return make(`stone${seed}${tone}`, 256, (g, s) => {
+    g.fillStyle = tone;
+    g.fillRect(0, 0, s, s);
+    speckle(g, s, 9000, 0.14, seed, false);
+    speckle(g, s, 3000, 0.12, seed + 1);
+    const grd = g.createLinearGradient(0, 0, 0, s);
+    grd.addColorStop(0, "rgba(0,0,0,0)");
+    grd.addColorStop(1, "rgba(40,30,20,0.15)");
+    g.fillStyle = grd;
+    g.fillRect(0, 0, s, s);
+  });
+}
+
+/** A lit room seen through a window: back wall, floor, side walls in perspective, lamp glow. */
+export function roomInterior(seed: number) {
+  return make(`room${seed}`, 128, (g, s) => {
+    let sd = seed * 97 + 3;
+    const r = () => ((sd = (sd * 16807) % 2147483647) / 2147483647);
+    const wall = ["#e9c89a", "#d9b48a", "#c9d4c0", "#e7d2b0", "#b9a28a"][Math.floor(r() * 5)];
+    g.fillStyle = wall;
+    g.fillRect(0, 0, s, s);
+    const inset = s * 0.22;
+    g.fillStyle = "rgba(0,0,0,0.28)";
+    g.beginPath(); g.moveTo(0, 0); g.lineTo(inset, inset); g.lineTo(inset, s - inset); g.lineTo(0, s); g.fill();
+    g.beginPath(); g.moveTo(s, 0); g.lineTo(s - inset, inset); g.lineTo(s - inset, s - inset); g.lineTo(s, s); g.fill();
+    g.fillStyle = "#6b4a30";
+    g.beginPath(); g.moveTo(0, s); g.lineTo(inset, s - inset); g.lineTo(s - inset, s - inset); g.lineTo(s, s); g.fill();
+    g.fillStyle = "rgba(0,0,0,0.12)";
+    g.beginPath(); g.moveTo(0, 0); g.lineTo(inset, inset); g.lineTo(s - inset, inset); g.lineTo(s, 0); g.fill();
+    // furniture silhouettes: shelf / picture / plant
+    g.fillStyle = "rgba(60,35,20,0.8)";
+    if (r() < 0.6) g.fillRect(inset + r() * s * 0.3, s * 0.35, s * 0.18, s * 0.28);
+    g.fillStyle = "rgba(40,60,90,0.7)";
+    if (r() < 0.6) g.fillRect(s * 0.55, s * 0.3, s * 0.12, s * 0.09);
+    const lamp = g.createRadialGradient(s * 0.5, s * 0.25, 2, s * 0.5, s * 0.25, s * 0.55);
+    lamp.addColorStop(0, "rgba(255,240,200,0.9)");
+    lamp.addColorStop(1, "rgba(255,200,120,0)");
+    g.fillStyle = lamp;
+    g.fillRect(0, 0, s, s);
+    // curtains
+    g.fillStyle = ["rgba(150,40,40,0.8)", "rgba(230,230,220,0.7)", "rgba(60,90,70,0.8)"][Math.floor(r() * 3)];
+    g.fillRect(0, 0, s * 0.18, s);
+    g.fillRect(s * 0.82, 0, s * 0.18, s);
+  });
+}

@@ -170,46 +170,94 @@ export class UI {
     this.modal = null;
   }
 
-  menu(portraits: Record<string, string>, hasSave: boolean, onStart: (players: number, cont: boolean) => void) {
+  menu(portraits: Record<string, string>, hasSave: boolean, room: string | null, cb: { solo: (cont: boolean) => void; host: () => void; join: (code: string) => void }) {
     this.closeModal();
     const m = h("div", "modal menu");
     m.innerHTML = `
       <div class="title"><h1>Дымок <span>и</span> Милена</h1><p>Два кота. Один большой город. Ноль чувства направления.</p></div>
       <div class="menu-cats">
-        <figure><img src="${portraits.dymok}"><figcaption>Дымок<br><small>сила, рывок, пушистость</small></figcaption></figure>
-        <figure><img src="${portraits.milena}"><figcaption>Милена<br><small>ловкость, прыжки, шипение</small></figcaption></figure>
-        <figure><img src="${portraits.pixel}"><figcaption>Пиксель<br><small>3-й игрок, двойной прыжок</small></figcaption></figure>
+        <figure><img src="${portraits.dymok}"><figcaption>Дымок<br><small>сила · рывок · пушистость</small></figcaption></figure>
+        <figure><img src="${portraits.milena}"><figcaption>Милена<br><small>ловкость · прыжки · шипение</small></figcaption></figure>
+        <figure><img src="${portraits.pixel}"><figcaption>Пиксель<br><small>3-й игрок онлайн · двойной прыжок</small></figcaption></figure>
       </div>
-      <div class="menu-buttons">
-        ${hasSave ? `<button data-c="1" class="primary">Продолжить</button>` : ""}
-        <button data-p="1" class="${hasSave ? "" : "primary"}">1 игрок</button>
-        <button data-p="2">2 игрока</button>
-        <button data-p="3">3 игрока</button>
+      <div class="menu-cols">
+        <section>
+          <h3>Одиночная игра</h3>
+          <p class="hint">Играете за обоих котов — Tab или клик по портрету.</p>
+          <div class="menu-buttons">
+            ${hasSave ? `<button data-a="cont" class="primary">Продолжить</button>` : ""}
+            <button data-a="new" class="${hasSave ? "" : "primary"}">Новая игра</button>
+          </div>
+        </section>
+        <section>
+          <h3>Онлайн · до 3 игроков</h3>
+          <p class="hint">Создайте комнату и отправьте ссылку друзьям.</p>
+          <div class="menu-buttons">
+            <button data-a="host">Создать комнату</button>
+          </div>
+          <div class="join"><input maxlength="5" placeholder="КОД" value="${room ?? ""}" spellcheck="false"><button data-a="join" class="${room ? "primary" : ""}">Войти</button></div>
+        </section>
       </div>
       <details class="controls"><summary>Управление</summary>
       <table>
-        <tr><th></th><th>Игрок 1</th><th>Игрок 2</th><th>Игрок 3</th></tr>
-        <tr><td>Ходьба</td><td>WASD</td><td>Стрелки</td><td>Numpad 8456</td></tr>
-        <tr><td>Камера</td><td>Мышь / Z X</td><td>[ ]</td><td>Numpad / *</td></tr>
-        <tr><td>Прыжок</td><td>Пробел</td><td>Enter</td><td>Numpad 0</td></tr>
-        <tr><td>Бег / красться</td><td>Shift / Ctrl, C</td><td>R-Shift / /</td><td>Num + / Num .</td></tr>
-        <tr><td>Удар</td><td>ЛКМ / F</td><td>.</td><td>Numpad 7</td></tr>
-        <tr><td>Действие</td><td>E</td><td>;</td><td>Numpad 9</td></tr>
-        <tr><td>Умение</td><td>Q</td><td>,</td><td>Numpad 1</td></tr>
-        <tr><td>Паутина (держать)</td><td>ПКМ / R</td><td>'</td><td>Numpad 3</td></tr>
-        <tr><td>Сменить кота / приказ</td><td>Tab / G</td><td>—</td><td>—</td></tr>
-        <tr><td>Вид от 1-го лица</td><td>V</td><td>\\</td><td>Numpad −</td></tr>
+        <tr><td>Ходьба / рысь</td><td>WASD (мягкий стик — шаг)</td></tr>
+        <tr><td>Галоп / красться</td><td>Shift / Ctrl или C</td></tr>
+        <tr><td>Камера</td><td>мышь (клик — захват курсора)</td></tr>
+        <tr><td>Прыжок</td><td>Пробел</td></tr>
+        <tr><td>Удар / умение</td><td>ЛКМ или F / Q</td></tr>
+        <tr><td>Действие</td><td>E</td></tr>
+        <tr><td>Паутина (держать)</td><td>ПКМ или R</td></tr>
+        <tr><td>Сменить кота / приказ</td><td>Tab или клик по портрету / G</td></tr>
+        <tr><td>Вид от 1-го лица</td><td>V</td></tr>
+        <tr><td>Сардины · пауза</td><td>H · Esc</td></tr>
       </table>
-      <p>Геймпады: 1-й геймпад — игрок 1, 2-й — игрок 2, 3-й — игрок 3. На iPhone/iPad — экранный джойстик и кнопки.</p>
+      <p>Геймпад тоже работает. На iPhone/iPad — экранный джойстик и кнопки.</p>
       </details>`;
-    m.querySelectorAll<HTMLButtonElement>("button").forEach((b) => {
-      b.onclick = () => {
-        this.closeModal();
-        onStart(Number(b.dataset.p ?? 0), !!b.dataset.c);
-      };
+    const input = m.querySelector("input") as HTMLInputElement;
+    input.addEventListener("input", () => (input.value = input.value.toUpperCase().replace(/[^A-Z0-9]/g, "")));
+    input.addEventListener("keydown", (e) => e.stopPropagation());
+    const go = (f: () => void) => () => {
+      this.closeModal();
+      f();
+    };
+    m.querySelector<HTMLButtonElement>("[data-a=cont]")?.addEventListener("click", go(() => cb.solo(true)));
+    m.querySelector<HTMLButtonElement>("[data-a=new]")!.addEventListener("click", go(() => cb.solo(false)));
+    m.querySelector<HTMLButtonElement>("[data-a=host]")!.addEventListener("click", go(() => cb.host()));
+    m.querySelector<HTMLButtonElement>("[data-a=join]")!.addEventListener("click", () => {
+      if (input.value.length < 5) {
+        input.focus();
+        input.classList.add("err");
+        return;
+      }
+      this.closeModal();
+      cb.join(input.value);
     });
     this.root.appendChild(m);
     this.modal = m;
+  }
+
+  /** Room code + invite link while playing online. */
+  roomBadge(code: string | null, players = 1) {
+    let el = this.root.querySelector<HTMLElement>(".room-badge");
+    if (!code) {
+      el?.remove();
+      return;
+    }
+    if (!el) {
+      el = h("div", "room-badge");
+      this.root.appendChild(el);
+    }
+    const link = `${location.origin}${location.pathname}?room=${code}`;
+    el.innerHTML = `<span>Комната <b>${code}</b> · игроков: ${players}/3</span><button>Скопировать ссылку</button>`;
+    el.querySelector("button")!.onclick = async (e) => {
+      e.stopPropagation();
+      try {
+        await navigator.clipboard.writeText(link);
+        this.toast("Ссылка скопирована — отправьте её друзьям");
+      } catch {
+        prompt("Ссылка для друзей:", link);
+      }
+    };
   }
 
   pause(opts: { tracking: boolean; quality: string; music: number }, cb: { resume: () => void; tracking: (v: boolean) => void; quality: (q: string) => void; music: (v: number) => void; menu: () => void; reset: () => void }) {
@@ -217,7 +265,7 @@ export class UI {
     const m = h("div", "modal pause");
     m.innerHTML = `<h2>Пауза</h2>
       <label><input type="checkbox" ${opts.tracking ? "checked" : ""} data-k="track"> Стрелка задания (отключение не сбрасывает прогресс)</label>
-      <label>Шерсть: <select data-k="q"><option value="high">Высокое (12 слоёв)</option><option value="med">Среднее (8)</option><option value="low">Низкое (4) — для iPhone</option></select></label>
+      <label>Шерсть: <select data-k="q"><option value="high">Высокое (16 слоёв)</option><option value="med">Среднее (8)</option><option value="low">Низкое (4) — для iPhone</option></select></label>
       <label>Музыка <input type="range" min="0" max="1" step="0.05" value="${opts.music}" data-k="music"></label>
       <div class="menu-buttons"><button class="primary" data-a="resume">Продолжить</button><button data-a="menu">В главное меню</button><button data-a="reset" class="danger">Сбросить сохранение</button></div>`;
     (m.querySelector("select") as HTMLSelectElement).value = opts.quality;
