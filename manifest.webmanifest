@@ -1,0 +1,9 @@
+{
+  "name": "Дымок и Милена",
+  "short_name": "Дымок и Милена",
+  "display": "fullscreen",
+  "orientation": "landscape",
+  "background_color": "#14161f",
+  "theme_color": "#14161f",
+  "start_url": "./"
+}
